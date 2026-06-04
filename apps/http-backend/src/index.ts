@@ -7,6 +7,7 @@ import {
   SigninSchema,
   CreateRoomSchema,
 } from "@repo/common/types";
+import { PrismaClient } from "@repo/db/client";
 
 const app = express();
 
@@ -18,7 +19,9 @@ app.post("/signup", (req, res) => {
     });
     return;
   }
-
+  PrismaClient.user.create({
+    
+  })
   res.json({
     userId: 123,
   });
