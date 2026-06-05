@@ -10,6 +10,10 @@ import {
 import { PrismaClient } from "@repo/db/client";
 
 const app = express();
+app.use(express.json());
+const DEFAULT_PORT = 3001;
+const FALLBACK_PORT = 3101;
+const configuredPort = Number(process.env.HTTP_PORT ?? DEFAULT_PORT);
 
 app.post("/signup", async (req, res) => {
   const parseData = CreateUserSchema.safeParse(req.body);
@@ -20,15 +24,15 @@ app.post("/signup", async (req, res) => {
     return;
   }
   try {
-    await PrismaClient.user.create({
+    const user = await PrismaClient.user.create({
       data: {
-        email: parseData.data?.username,
-        password: parseData.data?.password,
-        name: parseData.data?.name,
+        email: parseData.data.username,
+        password: parseData.data.password,
+        name: parseData.data.name,
       },
     });
     res.json({
-      userId: 123,
+      userId: user.id,
     });
   } catch (e) {
     res.status(411).json({
@@ -36,7 +40,8 @@ app.post("/signup", async (req, res) => {
     });
   }
 });
-app.post("/signin", (req, res) => {
+
+app.post("/signin", async (req, res) => {
   const data = SigninSchema.safeParse(req.body);
   if (!data.success) {
     res.json({
@@ -45,17 +50,37 @@ app.post("/signin", (req, res) => {
     return;
   }
 
-  const userId = 1;
-  const token = jwt.sign(
-    {
-      userId,
-    },
-    JWT_SECRET,
-  );
+  try {
+    const user = await PrismaClient.user.findFirst({
+      where: {
+        email: data.data.username,
+        password: data.data.password,
+      },
+    });
 
-  res.json({ token });
+    if (!user) {
+      res.status(403).json({
+        message: "Invalid credentials",
+      });
+      return;
+    }
+
+    const token = jwt.sign(
+      {
+        userId: user.id,
+      },
+      JWT_SECRET,
+    );
+
+    res.json({ token });
+  } catch (e) {
+    res.status(500).json({
+      message: "Internal server error",
+    });
+  }
 });
-app.post("/room", middleware, (req, res) => {
+
+app.post("/room", middleware, async (req, res) => {
   const data = CreateRoomSchema.safeParse(req.body);
   if (!data.success) {
     res.json({
@@ -63,9 +88,91 @@ app.post("/room", middleware, (req, res) => {
     });
     return;
   }
-  res.json({
-    roomId: 123,
-  });
+
+  const userId = (req as any).userId;
+
+  try {
+    const room = await PrismaClient.room.create({
+      data: {
+        slug: data.data.name,
+        adminId: userId,
+      },
+    });
+
+    res.json({
+      roomId: room.id,
+    });
+  } catch (e) {
+    res.status(411).json({
+      message: "Room already exists",
+    });
+  }
 });
 
-app.listen(3001);
+app.get("/chats/:roomId", async (req, res) => {
+  const roomId = Number(req.params.roomId);
+  try {
+    const chats = await PrismaClient.chat.findMany({
+      where: {
+        roomId: roomId
+      },
+      orderBy: {
+        id: "desc"
+      },
+      take: 50
+    });
+    res.json({
+      chats
+    });
+  } catch (e) {
+    res.json({
+      chats: []
+    });
+  }
+});
+
+app.get("/room/:slug", async (req, res) => {
+  const slug = req.params.slug;
+  try {
+    const room = await PrismaClient.room.findFirst({
+      where: {
+        slug
+      }
+    });
+
+    if (!room) {
+      res.status(404).json({
+        message: "Room not found"
+      });
+      return;
+    }
+
+    res.json({
+      room
+    });
+  } catch (e) {
+    res.status(500).json({
+      message: "Internal server error"
+    });
+  }
+});
+
+function startServer(port: number) {
+  const server = app.listen(port, () => {
+    console.log(`http-backend listening on http://localhost:${port}`);
+  });
+
+  server.once("error", (error: NodeJS.ErrnoException) => {
+    if (error.code === "EADDRINUSE") {
+      const nextPort = port < FALLBACK_PORT ? FALLBACK_PORT : port + 1;
+      startServer(nextPort);
+      return;
+    }
+
+    throw error;
+  });
+
+  return server;
+}
+
+startServer(configuredPort);

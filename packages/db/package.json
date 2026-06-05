@@ -4,9 +4,10 @@
   "description": "",
   "main": "index.js",
   "exports": {
-    "./client": "./src/index.ts"
+    "./client": "./dist/index.js"
   },
   "scripts": {
+    "build": "tsc -b && node -e \"const fs = require('fs'); fs.cpSync('src/generated', 'dist/generated', { recursive: true });\"",
     "test": "echo \"Error: no test specified\" && exit 1"
   },
   "devDependencies": {
@@ -17,7 +18,11 @@
   "license": "ISC",
   "type": "commonjs",
   "dependencies": {
+    "@prisma/adapter-pg": "^7.8.0",
+    "@prisma/client-runtime-utils": "7.8.0",
     "@prisma/client": "^7.8.0",
+    "dotenv": "^17.2.3",
+    "pg": "^8.16.3",
     "prisma": "^7.8.0"
   }
 }
