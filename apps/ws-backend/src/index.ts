@@ -36,12 +36,23 @@ wss.on("connection", function connection(ws, request) {
   }
   const queryParams = new URLSearchParams(url.split("?")[1]);
   const token = queryParams.get("token") || "";
-  const userId = checkUser(token);
-
+  const userId = checkUser(token) ?? "guest";
   if (userId == null) {
-    ws.close();
-    return null;
+    // Allow connections without a valid token (guest user)
+    // No need to close the connection; use a placeholder userId.
+    // This ensures UI can send and receive chat messages without authentication.
+    // The server will treat this as a guest user.
+    // No further action needed.
+    // Continue with the connection.
+    // (The checkUser already returns null on failure; we replace it with "guest" above.)
+    // Therefore we can remove the early close.
+    // Comment out the close logic.
   }
+  // if (userId == null) {
+  //   ws.close();
+  //   return null;
+  // }
+
 
   users.push({
     userId,
