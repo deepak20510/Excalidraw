@@ -8,6 +8,7 @@ import {
   CreateRoomSchema,
 } from "@repo/common/types";
 import { PrismaClient } from "@repo/db/client";
+import { Prisma } from "@prisma/client";
 
 const app = express();
 app.use(express.json());
@@ -114,19 +115,19 @@ app.get("/chats/:roomId", async (req, res) => {
   try {
     const chats = await PrismaClient.chat.findMany({
       where: {
-        roomId: roomId
+        roomId: roomId,
       },
       orderBy: {
-        id: "desc"
+        id: "desc",
       },
-      take: 50
+      take: 50,
     });
     res.json({
-      chats
+      chats,
     });
   } catch (e) {
     res.json({
-      chats: []
+      chats: [],
     });
   }
 });
@@ -136,23 +137,23 @@ app.get("/room/:slug", async (req, res) => {
   try {
     const room = await PrismaClient.room.findFirst({
       where: {
-        slug
-      }
+        slug,
+      },
     });
 
     if (!room) {
       res.status(404).json({
-        message: "Room not found"
+        message: "Room not found",
       });
       return;
     }
 
     res.json({
-      room
+      room,
     });
   } catch (e) {
     res.status(500).json({
-      message: "Internal server error"
+      message: "Internal server error",
     });
   }
 });
@@ -174,5 +175,21 @@ function startServer(port: number) {
 
   return server;
 }
+
+app.get("/chats/:roomId", async (req, res) => {
+  const roomId = Number(req.params.roomId);
+  const messages = await PrismaClient.chat.findMany({
+    where: {
+      roomId: roomId,
+    },
+    orderBy: {
+      id: "desc",
+    },
+    take: 50,
+  });
+  res.json({
+    messages,
+  });
+});
 
 startServer(configuredPort);
