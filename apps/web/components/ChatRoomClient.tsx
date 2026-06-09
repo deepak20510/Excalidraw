@@ -51,6 +51,11 @@ export function ChatRoomClient({
       <button
         onClick={() => {
           if (socket?.readyState === WebSocket.OPEN) {
+            console.log("Sending:", {
+              type: "chat",
+              roomId: id,
+              message: currentMessage,
+            });
             socket.send(
               JSON.stringify({
                 type: "chat",

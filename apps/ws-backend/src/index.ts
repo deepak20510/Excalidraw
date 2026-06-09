@@ -30,30 +30,22 @@ function checkUser(token: string): string | null {
 }
 
 wss.on("connection", function connection(ws, request) {
+  console.log("NEW WS CONNECTION");
   const url = request.url;
+  console.log("URL:", url);
   if (!url) {
     return;
   }
   const queryParams = new URLSearchParams(url.split("?")[1]);
   const token = queryParams.get("token") || "";
-  const userId = checkUser(token) ?? "guest";
-  if (userId == null) {
-    // Allow connections without a valid token (guest user)
-    // No need to close the connection; use a placeholder userId.
-    // This ensures UI can send and receive chat messages without authentication.
-    // The server will treat this as a guest user.
-    // No further action needed.
-    // Continue with the connection.
-    // (The checkUser already returns null on failure; we replace it with "guest" above.)
-    // Therefore we can remove the early close.
-    // Comment out the close logic.
+  console.log("TOKEN:", token);
+  const userId = checkUser(token);
+  console.log("USER ID:", userId);
+
+  if (!userId) {
+    ws.close();
+    return;
   }
-  // if (userId == null) {
-  //   ws.close();
-  //   return null;
-  // }
-
-
   users.push({
     userId,
     rooms: [],
@@ -61,8 +53,9 @@ wss.on("connection", function connection(ws, request) {
   });
 
   ws.on("message", async function message(data) {
+    console.log("RAW MESSAGE:", data.toString());
     const parsedData = JSON.parse(data as unknown as string);
-
+    console.log(parsedData);
     if (parsedData.type === "join_room") {
       const user = users.find((x) => x.ws === ws);
       user?.rooms.push(parsedData.roomId);
