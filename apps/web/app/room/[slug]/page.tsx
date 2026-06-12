@@ -15,6 +15,31 @@ export default async function ChatRoom({
   }>;
 }) {
   const { slug } = await params;
-  const roomId = await getRoomId(slug);
-  return <ChatRoomComponent id={roomId} />;
+  try {
+    const roomId = await getRoomId(slug);
+    return <ChatRoomComponent id={String(roomId)} />;
+  } catch (error) {
+    return (
+      <div style={{
+        display: "flex",
+        flexDirection: "column",
+        justifyContent: "center",
+        alignItems: "center",
+        height: "100vh",
+        width: "100vw",
+        fontFamily: "sans-serif"
+      }}>
+        <h2>Room Not Found</h2>
+        <p>The room "{slug}" does not exist.</p>
+        <a href="/" style={{
+          padding: "8px 16px",
+          backgroundColor: "#0070f3",
+          color: "white",
+          textDecoration: "none",
+          borderRadius: "4px",
+          marginTop: "10px"
+        }}>Go Home</a>
+      </div>
+    );
+  }
 }

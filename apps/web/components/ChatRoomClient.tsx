@@ -1,45 +1,69 @@
+// ChatRoomClient component with proper WebSocket handling
 "use client";
 
 import { useEffect, useState } from "react";
 import { useSocket } from "../hooks/useSocket";
 
 export function ChatRoomClient({
-  messages,
+  messages: initialMessages,
   id,
 }: {
   messages: { message: string }[];
   id: string;
 }) {
-  const [chats, setChats] = useState(messages);
+  const [messages, setMessages] = useState(initialMessages);
   const [currentMessage, setCurrentMessage] = useState("");
-
   const { socket, loading } = useSocket();
 
   useEffect(() => {
-    if (!socket || loading) return;
+    if (!socket) return;
 
-    if (socket.readyState === WebSocket.OPEN) {
-      socket.send(
-        JSON.stringify({
-          type: "join_room",
-          roomId: id,
-        }),
-      );
-    }
-
-    socket.onmessage = (event) => {
-      const parseData = JSON.parse(event.data);
-
-      if (parseData.type === "chat") {
-        setChats((c) => [...c, { message: parseData.message }]);
+    const handleMessage = (event: MessageEvent) => {
+      const data = JSON.parse(event.data);
+      if (data.type === "chat") {
+        setMessages((prev) => [...prev, { message: data.message }]);
       }
     };
-  }, [socket, loading, id]);
+
+    socket.addEventListener("message", handleMessage);
+
+    const joinRoom = () => {
+      socket.send(JSON.stringify({ type: "join_room", roomId: id }));
+    };
+
+    if (socket.readyState === WebSocket.OPEN) {
+      joinRoom();
+    } else {
+      socket.addEventListener("open", joinRoom);
+    }
+
+    return () => {
+      socket.removeEventListener("message", handleMessage);
+      socket.removeEventListener("open", joinRoom);
+    };
+  }, [socket, id]);
+
+  if (loading) {
+    return <div>Loading...</div>;
+  }
+
+  const sendMessage = () => {
+    if (socket?.readyState === WebSocket.OPEN && currentMessage.trim() !== "") {
+      socket.send(
+        JSON.stringify({
+          type: "chat",
+          roomId: id,
+          message: currentMessage,
+        }),
+      );
+      setCurrentMessage("");
+    }
+  };
 
   return (
     <div>
-      {chats.map((m, index) => (
-        <div key={index}>{m.message}</div>
+      {messages.map((m, i) => (
+        <div key={i}>{m.message}</div>
       ))}
 
       <input
@@ -48,26 +72,7 @@ export function ChatRoomClient({
         onChange={(e) => setCurrentMessage(e.target.value)}
       />
 
-      <button
-        onClick={() => {
-          if (socket?.readyState === WebSocket.OPEN) {
-            console.log("Sending:", {
-              type: "chat",
-              roomId: id,
-              message: currentMessage,
-            });
-            socket.send(
-              JSON.stringify({
-                type: "chat",
-                roomId: id,
-                message: currentMessage,
-              }),
-            );
-          }
-        }}
-      >
-        Send Message
-      </button>
+      <button onClick={sendMessage}>Send Message</button>
     </div>
   );
 }

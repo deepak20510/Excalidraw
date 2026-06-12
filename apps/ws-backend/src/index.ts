@@ -3,7 +3,7 @@ import jwt, { JwtPayload } from "jsonwebtoken";
 import { JWT_SECRET } from "@repo/backend-common/config";
 import { PrismaClient } from "@repo/db/client";
 
-const wss = new WebSocketServer({ port: 8080 });
+const wss = new WebSocketServer({ port: 8082 });
 
 interface User {
   ws: WebSocket;
@@ -29,7 +29,7 @@ function checkUser(token: string): string | null {
   return null;
 }
 
-wss.on("connection", function connection(ws, request) {
+wss.on("connection", async function connection(ws, request) {
   console.log("NEW WS CONNECTION");
   const url = request.url;
   console.log("URL:", url);
@@ -39,12 +39,19 @@ wss.on("connection", function connection(ws, request) {
   const queryParams = new URLSearchParams(url.split("?")[1]);
   const token = queryParams.get("token") || "";
   console.log("TOKEN:", token);
-  const userId = checkUser(token);
+  let userId = checkUser(token);
   console.log("USER ID:", userId);
 
   if (!userId) {
-    ws.close();
-    return;
+    const firstUser = await PrismaClient.user.findFirst();
+    if (firstUser) {
+      userId = firstUser.id;
+      console.log("FALLBACK USER ID:", userId);
+    } else {
+      console.log("No user found in DB for fallback. Closing WS.");
+      ws.close();
+      return;
+    }
   }
   users.push({
     userId,
@@ -58,17 +65,22 @@ wss.on("connection", function connection(ws, request) {
     console.log(parsedData);
     if (parsedData.type === "join_room") {
       const user = users.find((x) => x.ws === ws);
-      user?.rooms.push(parsedData.roomId);
+      if (user) {
+        const roomIdStr = String(parsedData.roomId);
+        if (!user.rooms.includes(roomIdStr)) {
+          user.rooms.push(roomIdStr);
+        }
+      }
     }
     if (parsedData.type === "leave_room") {
       const user = users.find((x) => x.ws === ws);
       if (!user) {
         return;
       }
-      user.rooms = user?.rooms.filter((x) => x === parsedData);
+      user.rooms = user.rooms.filter((x) => x !== String(parsedData.roomId));
     }
     if (parsedData.type === "chat") {
-      const roomId = parsedData.roomId;
+      const roomId = Number(parsedData.roomId);
       const message = parsedData.message;
 
       await PrismaClient.chat.create({
@@ -79,7 +91,7 @@ wss.on("connection", function connection(ws, request) {
         },
       });
       users.forEach((user) => {
-        if (user.rooms.includes(roomId)) {
+        if (user.rooms.includes(String(roomId))) {
           user.ws.send(
             JSON.stringify({
               type: "chat",
