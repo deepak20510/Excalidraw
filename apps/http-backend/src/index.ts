@@ -10,6 +10,7 @@ import {
 import { PrismaClient } from "@repo/db/client";
 import { Prisma } from "@prisma/client";
 
+
 const app = express();
 app.use(express.json());
 const DEFAULT_PORT = 3001;
