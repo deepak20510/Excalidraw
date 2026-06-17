@@ -8,11 +8,11 @@ import {
   CreateRoomSchema,
 } from "@repo/common/types";
 import { PrismaClient } from "@repo/db/client";
-import { Prisma } from "@prisma/client";
-
+import cors from "cors";
 
 const app = express();
 app.use(express.json());
+app.use(cors());
 const DEFAULT_PORT = 3001;
 const FALLBACK_PORT = 3101;
 const configuredPort = Number(process.env.HTTP_PORT ?? DEFAULT_PORT);
