@@ -1,6 +1,6 @@
 "use client";
 
-import React, { useState, useEffect } from "react";
+import React, { useState, useSyncExternalStore } from "react";
 import {
   ArrowRight,
   Sparkles,
@@ -15,13 +15,92 @@ import {
   Move,
 } from "lucide-react";
 import Link from "next/link";
+import { useRouter } from "next/navigation";
+import axios from "axios";
+import { HTTP_BACKEND } from "@/config";
+
+type ErrorResponse = {
+  message?: string;
+};
+
+function subscribeToAuthChange(onStoreChange: () => void) {
+  const handleStorage = (event: StorageEvent) => {
+    if (event.key === "token") {
+      onStoreChange();
+    }
+  };
+
+  window.addEventListener("storage", handleStorage);
+  return () => window.removeEventListener("storage", handleStorage);
+}
+
+function getAuthSnapshot() {
+  if (typeof window === "undefined") {
+    return false;
+  }
+
+  return Boolean(window.localStorage.getItem("token"));
+}
 
 export default function LandingPage() {
-  const [year, setYear] = useState("");
+  const [year] = useState(() => new Date().getFullYear().toString());
+  const [showRoomInput, setShowRoomInput] = useState(false);
+  const [roomSlug, setRoomSlug] = useState("");
+  const [error, setError] = useState("");
+  const [loading, setLoading] = useState(false);
+  const router = useRouter();
+  const isLoggedIn = useSyncExternalStore(
+    subscribeToAuthChange,
+    getAuthSnapshot,
+    () => false
+  );
 
-  useEffect(() => {
-    setYear(new Date().getFullYear().toString());
-  }, []);
+  const handleStartWhiteboarding = () => {
+    const token = localStorage.getItem("token");
+    if (!token) {
+      router.push("/signin");
+    } else {
+      setShowRoomInput(true);
+    }
+  };
+
+  const handleJoinOrCreateRoom = async () => {
+    if (!roomSlug.trim()) return;
+    setError("");
+    setLoading(true);
+    const token = localStorage.getItem("token") || "";
+    try {
+      let roomId;
+      try {
+        const getRes = await axios.get(`${HTTP_BACKEND}/room/${roomSlug}`);
+        roomId = getRes.data.room.id;
+      } catch (err: unknown) {
+        if (axios.isAxiosError(err) && err.response?.status === 404) {
+          const createRes = await axios.post(
+            `${HTTP_BACKEND}/room`,
+            { name: roomSlug },
+            { headers: { Authorization: token } }
+          );
+          roomId = createRes.data.roomId;
+        } else {
+          throw err;
+        }
+      }
+
+      if (roomId) {
+        router.push(`/canvas/${roomId}`);
+      }
+    } catch (err: unknown) {
+      setError(
+        axios.isAxiosError<ErrorResponse>(err)
+          ? err.response?.data?.message ||
+              "Failed to join or create the room."
+          : "Failed to join or create the room."
+      );
+    } finally {
+      setLoading(false);
+    }
+  };
 
   return (
     <div className="min-h-screen bg-[#030712] text-slate-100 font-sans selection:bg-indigo-500/30 overflow-x-hidden relative">
@@ -64,20 +143,39 @@ export default function LandingPage() {
           </div>
 
           <div className="flex items-center gap-3">
-            <Link href={"/signup"}>
-              <button className="relative inline-flex items-center justify-center p-0.5 overflow-hidden text-sm font-medium rounded-xl group bg-gradient-to-br from-indigo-500 to-purple-500 group-hover:from-indigo-500 group-hover:to-purple-500 text-white focus:ring-2 focus:outline-none focus:ring-indigo-800 transition-all active:scale-95">
-                <span className="relative px-5 py-2 transition-all ease-in duration-75 bg-slate-950 rounded-xl group-hover:bg-opacity-0 font-semibold">
-                  Register
+            {isLoggedIn ? (
+              <button
+                onClick={() => {
+                  localStorage.removeItem("token");
+                  window.dispatchEvent(
+                    new StorageEvent("storage", { key: "token" })
+                  );
+                  setShowRoomInput(false);
+                }}
+                className="relative inline-flex items-center justify-center p-0.5 overflow-hidden text-sm font-medium rounded-xl group bg-gradient-to-br from-indigo-500 to-purple-500 text-white focus:ring-2 focus:outline-none focus:ring-indigo-800 transition-all active:scale-95"
+              >
+                <span className="relative px-5 py-2 transition-all ease-in duration-75 bg-slate-950 rounded-xl group-hover:bg-opacity-0 font-semibold cursor-pointer">
+                  Logout
                 </span>
               </button>
-            </Link>
-            <Link href={"/signin"}>
-              <button className="relative inline-flex items-center justify-center p-0.5 overflow-hidden text-sm font-medium rounded-xl group bg-gradient-to-br from-indigo-500 to-purple-500 group-hover:from-indigo-500 group-hover:to-purple-500 text-white focus:ring-2 focus:outline-none focus:ring-indigo-800 transition-all active:scale-95">
-                <span className="relative px-5 py-2 transition-all ease-in duration-75 bg-slate-950 rounded-xl group-hover:bg-opacity-0 font-semibold">
-                  Login
-                </span>
-              </button>
-            </Link>
+            ) : (
+              <>
+                <Link href={"/signup"}>
+                  <button className="relative inline-flex items-center justify-center p-0.5 overflow-hidden text-sm font-medium rounded-xl group bg-gradient-to-br from-indigo-500 to-purple-500 text-white focus:ring-2 focus:outline-none focus:ring-indigo-800 transition-all active:scale-95">
+                    <span className="relative px-5 py-2 transition-all ease-in duration-75 bg-slate-950 rounded-xl group-hover:bg-opacity-0 font-semibold cursor-pointer">
+                      Register
+                    </span>
+                  </button>
+                </Link>
+                <Link href={"/signin"}>
+                  <button className="relative inline-flex items-center justify-center p-0.5 overflow-hidden text-sm font-medium rounded-xl group bg-gradient-to-br from-indigo-500 to-purple-500 text-white focus:ring-2 focus:outline-none focus:ring-indigo-800 transition-all active:scale-95">
+                    <span className="relative px-5 py-2 transition-all ease-in duration-75 bg-slate-950 rounded-xl group-hover:bg-opacity-0 font-semibold cursor-pointer">
+                      Login
+                    </span>
+                  </button>
+                </Link>
+              </>
+            )}
           </div>
         </div>
       </nav>
@@ -101,15 +199,47 @@ export default function LandingPage() {
           architecture setups, interface designs, and workflows instantly.
         </p>
 
-        <div className="mt-12 flex flex-col sm:flex-row gap-4 justify-center items-center">
-          <button className="w-full sm:w-auto flex items-center justify-center gap-2 bg-gradient-to-r from-indigo-500 via-purple-500 to-pink-500 hover:opacity-95 text-white font-bold px-8 py-4 rounded-xl transition-all shadow-xl shadow-indigo-500/20 active:scale-[0.98]">
-            Start Whiteboarding
-            <ArrowRight className="w-5 h-5" />
-          </button>
-          <button className="w-full sm:w-auto flex items-center justify-center gap-2 bg-slate-900/60 hover:bg-slate-900 border border-white/[0.08] hover:border-white/[0.15] text-slate-200 font-semibold px-8 py-4 rounded-xl transition-all backdrop-blur-sm">
-            Explore Features
-          </button>
-        </div>
+        {!showRoomInput ? (
+          <div className="mt-12 flex flex-col sm:flex-row gap-4 justify-center items-center">
+            <button
+              onClick={handleStartWhiteboarding}
+              className="w-full sm:w-auto flex items-center justify-center gap-2 bg-gradient-to-r from-indigo-500 via-purple-500 to-pink-500 hover:opacity-95 text-white font-bold px-8 py-4 rounded-xl transition-all shadow-xl shadow-indigo-500/20 active:scale-[0.98]"
+            >
+              Start Whiteboarding
+              <ArrowRight className="w-5 h-5" />
+            </button>
+            <a
+              href="#features"
+              className="w-full sm:w-auto flex items-center justify-center gap-2 bg-slate-900/60 hover:bg-slate-900 border border-white/[0.08] hover:border-white/[0.15] text-slate-200 font-semibold px-8 py-4 rounded-xl transition-all backdrop-blur-sm"
+            >
+              Explore Features
+            </a>
+          </div>
+        ) : (
+          <div className="mt-12 max-w-md mx-auto flex flex-col gap-3">
+            <div className="flex flex-col sm:flex-row gap-2">
+              <input
+                type="text"
+                placeholder="Enter Room Name / Slug..."
+                value={roomSlug}
+                onChange={(e) => setRoomSlug(e.target.value)}
+                className="w-full px-5 py-3.5 bg-slate-950/80 border border-white/[0.06] focus:border-indigo-500/50 rounded-xl text-sm placeholder-slate-500 text-slate-200 outline-none transition-all focus:ring-2 focus:ring-indigo-500/10 tracking-wide"
+              />
+              <button
+                onClick={handleJoinOrCreateRoom}
+                disabled={loading}
+                className="w-full sm:w-auto flex items-center justify-center gap-2 bg-gradient-to-r from-indigo-500 to-purple-500 hover:opacity-95 text-white font-bold px-6 py-3.5 rounded-xl transition-all shadow-xl active:scale-[0.98] text-sm whitespace-nowrap disabled:opacity-50"
+              >
+                {loading ? "Please wait..." : "Join / Create"}
+              </button>
+            </div>
+            {error && (
+              <p className="text-red-400 text-xs text-left bg-red-500/10 border border-red-500/20 p-2 rounded-xl mt-1">
+                {error}
+              </p>
+            )}
+          </div>
+        )}
 
         {/* Dynamic App Preview Mockup */}
         <div className="mt-24 relative rounded-2xl border border-white/[0.08] bg-slate-900/20 p-3 shadow-2xl backdrop-blur-xl overflow-hidden max-w-5xl mx-auto">

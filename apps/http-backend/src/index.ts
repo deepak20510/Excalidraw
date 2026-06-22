@@ -20,7 +20,7 @@ const configuredPort = Number(process.env.HTTP_PORT ?? DEFAULT_PORT);
 app.post("/signup", async (req, res) => {
   const parseData = CreateUserSchema.safeParse(req.body);
   if (!parseData.success) {
-    res.json({
+    res.status(400).json({
       message: "Incorrect inputs",
     });
     return;
@@ -46,7 +46,7 @@ app.post("/signup", async (req, res) => {
 app.post("/signin", async (req, res) => {
   const data = SigninSchema.safeParse(req.body);
   if (!data.success) {
-    res.json({
+    res.status(400).json({
       message: "Incorrect inputs",
     });
     return;
@@ -85,7 +85,7 @@ app.post("/signin", async (req, res) => {
 app.post("/room", middleware, async (req, res) => {
   const data = CreateRoomSchema.safeParse(req.body);
   if (!data.success) {
-    res.json({
+    res.status(400).json({
       message: "Incorrect inputs",
     });
     return;
@@ -157,14 +157,20 @@ function startServer(port: number) {
 
 app.get("/chats/:roomId", async (req, res) => {
   const roomId = Number(req.params.roomId);
+  if (Number.isNaN(roomId)) {
+    res.status(400).json({
+      message: "Invalid room id",
+    });
+    return;
+  }
+
   const messages = await PrismaClient.chat.findMany({
     where: {
       roomId: roomId,
     },
     orderBy: {
-      id: "desc",
+      id: "asc",
     },
-    take: 50,
   });
   res.json({
     messages,

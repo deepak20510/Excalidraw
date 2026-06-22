@@ -12,6 +12,53 @@ interface User {
 }
 const users: User[] = [];
 
+async function resolveRoomId(roomIdOrSlug: unknown) {
+  if (typeof roomIdOrSlug === "number" && Number.isInteger(roomIdOrSlug)) {
+    const room = await PrismaClient.room.findUnique({
+      where: { id: roomIdOrSlug },
+      select: { id: true },
+    });
+    return room?.id ?? null;
+  }
+
+  if (typeof roomIdOrSlug === "string") {
+    const trimmedValue = roomIdOrSlug.trim();
+    if (!trimmedValue) {
+      return null;
+    }
+
+    const numericRoomId = Number(trimmedValue);
+    if (Number.isInteger(numericRoomId)) {
+      const room = await PrismaClient.room.findUnique({
+        where: { id: numericRoomId },
+        select: { id: true },
+      });
+      if (room) {
+        return room.id;
+      }
+    }
+
+    const room = await PrismaClient.room.findUnique({
+      where: { slug: trimmedValue },
+      select: { id: true },
+    });
+    return room?.id ?? null;
+  }
+
+  return null;
+}
+
+function sendWsError(ws: WebSocket, message: string) {
+  if (ws.readyState === WebSocket.OPEN) {
+    ws.send(
+      JSON.stringify({
+        type: "error",
+        message,
+      }),
+    );
+  }
+}
+
 function checkUser(token: string): string | null {
   try {
     const decode = jwt.verify(token, JWT_SECRET);
@@ -60,50 +107,82 @@ wss.on("connection", async function connection(ws, request) {
   });
 
   ws.on("message", async function message(data) {
-    let parsedData;
-    if (typeof data !== "string") {
-      parsedData = JSON.parse(data.toString());
-    } else {
-      parsedData = JSON.parse(data);
-    }
-    if (parsedData.type === "join_room") {
-      const user = users.find((x) => x.ws === ws);
-      if (user) {
-        const roomIdStr = String(parsedData.roomId);
-        if (!user.rooms.includes(roomIdStr)) {
-          user.rooms.push(roomIdStr);
-        }
+    try {
+      let parsedData;
+      if (typeof data !== "string") {
+        parsedData = JSON.parse(data.toString());
+      } else {
+        parsedData = JSON.parse(data);
       }
-    }
-    if (parsedData.type === "leave_room") {
-      const user = users.find((x) => x.ws === ws);
-      if (!user) {
-        return;
-      }
-      user.rooms = user.rooms.filter((x) => x !== String(parsedData.roomId));
-    }
-    if (parsedData.type === "chat") {
-      const roomId = Number(parsedData.roomId);
-      const message = parsedData.message;
+      if (!parsedData) return;
 
-      await PrismaClient.chat.create({
-        data: {
-          roomId,
-          message,
-          userId,
-        },
-      });
-      users.forEach((user) => {
-        if (user.rooms.includes(String(roomId))) {
-          user.ws.send(
-            JSON.stringify({
-              type: "chat",
-              message: message,
-              roomId,
-            }),
-          );
+      if (parsedData.type === "join_room") {
+        const resolvedRoomId = await resolveRoomId(parsedData.roomId);
+        if (!resolvedRoomId) {
+          sendWsError(ws, "Room not found");
+          return;
         }
-      });
+
+        const user = users.find((x) => x.ws === ws);
+        if (user) {
+          const roomIdStr = String(resolvedRoomId);
+          if (!user.rooms.includes(roomIdStr)) {
+            user.rooms.push(roomIdStr);
+          }
+        }
+      }
+      if (parsedData.type === "leave_room") {
+        const user = users.find((x) => x.ws === ws);
+        if (!user) {
+          return;
+        }
+        const resolvedRoomId = await resolveRoomId(parsedData.roomId);
+        if (!resolvedRoomId) {
+          return;
+        }
+
+        user.rooms = user.rooms.filter((x) => x !== String(resolvedRoomId));
+      }
+      if (parsedData.type === "chat") {
+        const roomId = await resolveRoomId(parsedData.roomId);
+        const message = parsedData.message;
+        if (!roomId) {
+          console.error("Invalid roomId:", parsedData.roomId);
+          sendWsError(ws, "Invalid room id");
+          return;
+        }
+
+        await PrismaClient.chat.create({
+          data: {
+            roomId,
+            message,
+            userId,
+          },
+        });
+        users.forEach((user) => {
+          if (user.rooms.includes(String(roomId))) {
+            if (user.ws.readyState === WebSocket.OPEN) {
+              user.ws.send(
+                JSON.stringify({
+                  type: "chat",
+                  message: message,
+                  roomId,
+                }),
+              );
+            }
+          }
+        });
+      }
+    } catch (e) {
+      console.error("Failed to process WebSocket message:", e);
     }
+  });
+
+  ws.on("close", () => {
+    const index = users.findIndex((x) => x.ws === ws);
+    if (index !== -1) {
+      users.splice(index, 1);
+    }
+    console.log("WS CONNECTION CLOSED, REMOVED USER");
   });
 });

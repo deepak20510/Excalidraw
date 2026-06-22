@@ -1,9 +1,58 @@
 "use client";
 
 import React, { useState } from "react";
-import { PencilLine, Sparkles, Mail, Lock, ArrowRight } from "lucide-react";
+import { PencilLine, Mail, Lock, ArrowRight, User } from "lucide-react";
+import { useRouter } from "next/navigation";
+import axios from "axios";
+import { HTTP_BACKEND } from "@/config";
+
+type ErrorResponse = {
+  message?: string;
+};
 
 export function AuthPage({ isSignin }: { isSignin: boolean }) {
+  const [username, setUsername] = useState("");
+  const [password, setPassword] = useState("");
+  const [name, setName] = useState("");
+  const [error, setError] = useState("");
+  const [loading, setLoading] = useState(false);
+  const router = useRouter();
+
+  const handleSubmit = async () => {
+    setError("");
+    if (!username || !password || (!isSignin && !name)) {
+      setError("Please fill in all fields");
+      return;
+    }
+    setLoading(true);
+    try {
+      if (isSignin) {
+        const res = await axios.post(`${HTTP_BACKEND}/signin`, {
+          username,
+          password,
+        });
+        localStorage.setItem("token", res.data.token);
+        router.push("/");
+      } else {
+        await axios.post(`${HTTP_BACKEND}/signup`, {
+          username,
+          password,
+          name,
+        });
+        router.push("/signin");
+      }
+    } catch (err: unknown) {
+      setError(
+        axios.isAxiosError<ErrorResponse>(err)
+          ? err.response?.data?.message ||
+              "An error occurred. Please check your inputs and try again."
+          : "An error occurred. Please check your inputs and try again."
+      );
+    } finally {
+      setLoading(false);
+    }
+  };
+
   return (
     <div className="w-screen h-screen flex justify-center items-center bg-[#030712] text-slate-100 font-sans relative overflow-hidden">
       {/* Decorative Grid & Radial Background Glows */}
@@ -36,6 +85,21 @@ export function AuthPage({ isSignin }: { isSignin: boolean }) {
 
         {/* Form Elements */}
         <div className="space-y-4">
+          {!isSignin && (
+            <div className="relative">
+              <div className="absolute inset-y-0 left-0 pl-3.5 flex items-center pointer-events-none text-slate-500">
+                <User className="w-4 h-4" />
+              </div>
+              <input
+                type="text"
+                placeholder="Full Name"
+                value={name}
+                onChange={(e) => setName(e.target.value)}
+                className="w-full pl-10 pr-4 py-3 bg-slate-950/80 border border-white/[0.06] focus:border-indigo-500/50 rounded-xl text-sm placeholder-slate-500 text-slate-200 outline-none transition-all focus:ring-2 focus:ring-indigo-500/10 tracking-wide"
+              />
+            </div>
+          )}
+
           <div className="relative">
             <div className="absolute inset-y-0 left-0 pl-3.5 flex items-center pointer-events-none text-slate-500">
               <Mail className="w-4 h-4" />
@@ -43,6 +107,8 @@ export function AuthPage({ isSignin }: { isSignin: boolean }) {
             <input
               type="text"
               placeholder="Email"
+              value={username}
+              onChange={(e) => setUsername(e.target.value)}
               className="w-full pl-10 pr-4 py-3 bg-slate-950/80 border border-white/[0.06] focus:border-indigo-500/50 rounded-xl text-sm placeholder-slate-500 text-slate-200 outline-none transition-all focus:ring-2 focus:ring-indigo-500/10 tracking-wide"
             />
           </div>
@@ -54,23 +120,24 @@ export function AuthPage({ isSignin }: { isSignin: boolean }) {
             <input
               placeholder="Password"
               type="password"
+              value={password}
+              onChange={(e) => setPassword(e.target.value)}
               className="w-full pl-10 pr-4 py-3 bg-slate-950/80 border border-white/[0.06] focus:border-indigo-500/50 rounded-xl text-sm placeholder-slate-500 text-slate-200 outline-none transition-all focus:ring-2 focus:ring-indigo-500/10 tracking-wide"
             />
           </div>
 
-          {isSignin && (
-            <div className="text-right">
-              <a href="#" className="text-xs text-indigo-400 hover:underline">
-                Forgot password?
-              </a>
+          {error && (
+            <div className="text-red-400 text-xs bg-red-500/10 border border-red-500/20 p-2.5 rounded-xl">
+              {error}
             </div>
           )}
 
           <button
-            onClick={() => {}}
-            className="w-full flex items-center justify-center gap-2 mt-2 bg-gradient-to-r from-indigo-500 via-purple-500 to-pink-500 hover:opacity-95 text-white font-bold py-3.5 px-4 rounded-xl transition-all shadow-xl shadow-indigo-500/10 active:scale-[0.99] text-sm"
+            onClick={handleSubmit}
+            disabled={loading}
+            className="w-full flex items-center justify-center gap-2 mt-2 bg-gradient-to-r from-indigo-500 via-purple-500 to-pink-500 hover:opacity-95 text-white font-bold py-3.5 px-4 rounded-xl transition-all shadow-xl shadow-indigo-500/10 active:scale-[0.99] text-sm disabled:opacity-50"
           >
-            {isSignin ? "Sign in" : "Sign up"}
+            {loading ? "Please wait..." : isSignin ? "Sign in" : "Sign up"}
             <ArrowRight className="w-4 h-4" />
           </button>
         </div>
@@ -79,9 +146,9 @@ export function AuthPage({ isSignin }: { isSignin: boolean }) {
         <div className="mt-6 text-center text-xs text-slate-500">
           {isSignin ? (
             <p>
-              Don't have an account?{" "}
+              Don&apos;t have an account?{" "}
               <a
-                href="#"
+                href="/signup"
                 className="text-indigo-400 font-medium hover:underline"
               >
                 Sign up
@@ -91,7 +158,7 @@ export function AuthPage({ isSignin }: { isSignin: boolean }) {
             <p>
               Already have an account?{" "}
               <a
-                href="#"
+                href="/signin"
                 className="text-indigo-400 font-medium hover:underline"
               >
                 Sign in

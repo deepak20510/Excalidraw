@@ -1,3 +1,5 @@
 packages:
-  - "apps/*"
+  - "apps/http-backend"
+  - "apps/web"
+  - "apps/ws-backend"
   - "packages/*"

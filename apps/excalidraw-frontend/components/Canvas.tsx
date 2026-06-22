@@ -11,14 +11,22 @@ export function Canvas({
   const canvasRef = useRef<HTMLCanvasElement>(null);
 
   useEffect(() => {
+    let cleanup: (() => void) | undefined;
+
     if (canvasRef.current) {
-      initDraw(canvasRef.current, roomId, socket);
+      void initDraw(canvasRef.current, roomId, socket).then((dispose) => {
+        cleanup = dispose;
+      });
     }
-  }, [roomId]);
+
+    return () => {
+      cleanup?.();
+    };
+  }, [roomId, socket]);
 
   return (
     <div>
-      <canvas ref={canvasRef} height={700} width={1600}></canvas>
+      <canvas ref={canvasRef} height={700} width={1600} />
     </div>
   );
 }
