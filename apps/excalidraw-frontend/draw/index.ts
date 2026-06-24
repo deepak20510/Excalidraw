@@ -14,6 +14,13 @@ export type Shape =
       centerX: number;
       centerY: number;
       radius: number;
+    }
+  | {
+      type: "pencil";
+      startX: number;
+      startY: number;
+      endX: number;
+      endY: number;
     };
 
 type ChatMessage = {
@@ -120,7 +127,7 @@ export async function initDraw(
       }
 
       const alreadyExists = existingShapes.some((existingShape) =>
-        areShapesEqual(existingShape, shape)
+        areShapesEqual(existingShape, shape),
       );
 
       if (!alreadyExists) {
@@ -160,14 +167,29 @@ export async function initDraw(
     const width = endX - startX;
     const height = endY - startY;
 
-    const shape: Shape = {
-      type: "rect",
-      x: startX,
-      y: startY,
-      height,
-      width,
-    };
-
+    //@ts-ignore
+    const selectedTool = window.selectedTool;
+    let shape: Shape | null = null;
+    if (selectedTool === "rect") {
+      shape = {
+        type: "rect",
+        x: startX,
+        y: startY,
+        height,
+        width,
+      };
+    } else if (selectedTool === "circle") {
+      const radius = Math.max(width, height) / 2;
+      shape = {
+        type: "circle",
+        radius: radius,
+        centerX: startX + radius,
+        centerY: startY + radius,
+      };
+    }
+    if (!shape) {
+      return;
+    }
     existingShapes.push(shape);
     clearCanvas(existingShapes, canvas, ctx);
 
@@ -192,7 +214,19 @@ export async function initDraw(
 
       ctx.fillStyle = "rgba(0, 0, 0, 1)";
       ctx.strokeStyle = "rgba(255, 255, 255, 1)";
-      ctx.strokeRect(startX, startY, width, height);
+      //@ts-ignore
+      const selectedTool = window.selectedTool;
+      if (selectedTool === "rect") {
+        ctx.strokeRect(startX, startY, width, height);
+      } else if (selectedTool === "circle") {
+        const radius = Math.sqrt(width * width + height * height) / 2;
+        const centerX = startX + radius;
+        const centerY = startY + radius;
+        ctx.beginPath();
+        ctx.arc(centerX, centerY, radius, 0, 2 * Math.PI);
+        ctx.stroke();
+        ctx.closePath();
+      }
     }
   };
 
@@ -221,6 +255,11 @@ function clearCanvas(
     if (shape.type === "rect") {
       ctx.strokeStyle = "rgba(255, 255, 255, 1)";
       ctx.strokeRect(shape.x, shape.y, shape.width, shape.height);
+    } else if (shape.type === "circle") {
+      ctx.beginPath();
+      ctx.arc(shape.centerX, shape.centerY, shape.radius, 0, 2 * Math.PI);
+      ctx.stroke();
+      ctx.closePath();
     }
   });
 }
@@ -232,7 +271,9 @@ async function getExistingShapes(roomId: string) {
   }
 
   try {
-    const res = await axios.get<ChatsResponse>(`${HTTP_BACKEND}/chats/${roomId}`);
+    const res = await axios.get<ChatsResponse>(
+      `${HTTP_BACKEND}/chats/${roomId}`,
+    );
     const messages = res.data.messages;
     const shapes = messages
       .map((x) => parseShapeMessage(x.message))
