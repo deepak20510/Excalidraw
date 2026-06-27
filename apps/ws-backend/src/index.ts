@@ -90,15 +90,8 @@ wss.on("connection", async function connection(ws, request) {
   console.log("USER ID:", userId);
 
   if (!userId) {
-    const firstUser = await PrismaClient.user.findFirst();
-    if (firstUser) {
-      userId = firstUser.id;
-      console.log("FALLBACK USER ID:", userId);
-    } else {
-      console.log("No user found in DB for fallback. Closing WS.");
-      ws.close();
-      return;
-    }
+    ws.close(1008, "Unauthorized: invalid or missing token.");
+    return;
   }
   users.push({
     userId,

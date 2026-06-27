@@ -1,5 +1,6 @@
 import express from "express";
 import jwt from "jsonwebtoken";
+import bcrypt from "bcryptjs";
 import { JWT_SECRET } from "@repo/backend-common/config";
 import { middleware } from "./middleware";
 import {
@@ -26,10 +27,11 @@ app.post("/signup", async (req, res) => {
     return;
   }
   try {
+    const hashedPassword = await bcrypt.hash(parseData.data.password, 10);
     const user = await PrismaClient.user.create({
       data: {
         email: parseData.data.username,
-        password: parseData.data.password,
+        password: hashedPassword,
         name: parseData.data.name,
       },
     });
@@ -56,11 +58,18 @@ app.post("/signin", async (req, res) => {
     const user = await PrismaClient.user.findFirst({
       where: {
         email: data.data.username,
-        password: data.data.password,
       },
     });
 
     if (!user) {
+      res.status(403).json({
+        message: "Invalid credentials",
+      });
+      return;
+    }
+
+    const passwordMatch = await bcrypt.compare(data.data.password, user.password);
+    if (!passwordMatch) {
       res.status(403).json({
         message: "Invalid credentials",
       });
