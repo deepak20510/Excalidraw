@@ -17,10 +17,7 @@ export type Shape =
     }
   | {
       type: "pencil";
-      startX: number;
-      startY: number;
-      endX: number;
-      endY: number;
+      points: { x: number; y: number }[];
     };
 
 type ChatMessage = {

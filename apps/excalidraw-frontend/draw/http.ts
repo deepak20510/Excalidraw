@@ -17,10 +17,7 @@ type Shape =
     }
   | {
       type: "pencil";
-      startX: number;
-      startY: number;
-      endX: number;
-      endY: number;
+      points: { x: number; y: number }[];
     };
 
 type ChatMessage = {
@@ -61,10 +58,15 @@ function isShape(value: unknown): value is Shape {
 
   if (shape.type === "pencil") {
     return (
-      typeof shape.startX === "number" &&
-      typeof shape.startY === "number" &&
-      typeof shape.endX === "number" &&
-      typeof shape.endY === "number"
+      Array.isArray(shape.points) &&
+      (shape.points as unknown[]).length > 0 &&
+      (shape.points as unknown[]).every(
+        (p: unknown) =>
+          typeof p === "object" &&
+          p !== null &&
+          typeof (p as Record<string, unknown>).x === "number" &&
+          typeof (p as Record<string, unknown>).y === "number",
+      )
     );
   }
 

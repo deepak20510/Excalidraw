@@ -166,6 +166,29 @@ wss.on("connection", async function connection(ws, request) {
           }
         });
       }
+
+      // Relay ephemeral mutation messages (delete, move, undo, redo)
+      // to other users in the same room without persisting to DB
+      if (
+        parsedData.type === "delete_shape" ||
+        parsedData.type === "move_shape" ||
+        parsedData.type === "undo" ||
+        parsedData.type === "redo"
+      ) {
+        const roomId = await resolveRoomId(parsedData.roomId);
+        if (!roomId) {
+          return;
+        }
+        users.forEach((user) => {
+          if (
+            user.ws !== ws &&
+            user.rooms.includes(String(roomId)) &&
+            user.ws.readyState === WebSocket.OPEN
+          ) {
+            user.ws.send(JSON.stringify({ ...parsedData, roomId }));
+          }
+        });
+      }
     } catch (e) {
       console.error("Failed to process WebSocket message:", e);
     }
