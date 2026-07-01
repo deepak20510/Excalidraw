@@ -1,9 +1,9 @@
 import { useEffect, useRef, useState } from "react";
 import { IconButton } from "./IconButton";
-import { Circle, Eraser, MousePointer2, Pencil, RectangleHorizontalIcon } from "lucide-react";
-import { Game } from "@/draw/Game";
+import { ArrowRight, Circle, Eraser, Minus, MousePointer2, Pencil, RectangleHorizontalIcon, Type } from "lucide-react";
+import { Game, Shape } from "@/draw/Game";
 
-export type Tool = "circle" | "rect" | "pencil" | "select" | "eraser";
+export type Tool = "circle" | "rect" | "pencil" | "select" | "eraser" | "line" | "arrow" | "text";
 
 export function Canvas({
     roomId,
@@ -14,14 +14,14 @@ export function Canvas({
 }) {
     const canvasRef = useRef<HTMLCanvasElement>(null);
     const [game, setGame] = useState<Game>();
-    const [selectedTool, setSelectedTool] = useState<Tool>("circle")
+    const [selectedTool, setSelectedTool] = useState<Tool>("circle");
+    const [selectedShape, setSelectedShape] = useState<Shape | null>(null);
 
     useEffect(() => {
         game?.setTool(selectedTool);
     }, [selectedTool, game]);
 
     useEffect(() => {
-
         if (canvasRef.current) {
             const g = new Game(canvasRef.current, roomId, socket);
             setGame(g);
@@ -30,16 +30,239 @@ export function Canvas({
                 g.destroy();
             }
         }
-
-
     }, [canvasRef]);
+
+    useEffect(() => {
+        if (game) {
+            game.onSelectionChange = (shape) => {
+                // Ensure we get a fresh reference so React triggers a re-render
+                setSelectedShape(shape ? { ...shape } : null);
+            };
+        }
+    }, [game]);
 
     return <div style={{
         height: "100vh",
-        overflow: "hidden"
+        overflow: "hidden",
+        position: "relative"
     }}>
         <canvas ref={canvasRef} width={window.innerWidth} height={window.innerHeight}></canvas>
         <Topbar setSelectedTool={setSelectedTool} selectedTool={selectedTool} />
+        
+        {/* Excalidraw styling panel */}
+        {selectedShape && (
+            <div style={{
+                position: "fixed",
+                left: 16,
+                top: 76,
+                width: 250,
+                background: "rgba(24, 24, 27, 0.9)",
+                backdropFilter: "blur(12px)",
+                border: "1px solid rgba(255, 255, 255, 0.1)",
+                borderRadius: 12,
+                padding: 16,
+                color: "white",
+                boxShadow: "0 10px 30px rgba(0, 0, 0, 0.5)",
+                display: "flex",
+                flexDirection: "column",
+                gap: 16,
+                zIndex: 50,
+            }}>
+                <h3 style={{ margin: 0, fontSize: 13, fontWeight: 600, textTransform: "uppercase", letterSpacing: "0.05em", color: "rgba(255, 255, 255, 0.8)", borderBottom: "1px solid rgba(255, 255, 255, 0.1)", paddingBottom: 8 }}>
+                    Stroke Style
+                </h3>
+
+                {/* Stroke Color */}
+                <div style={{ display: "flex", flexDirection: "column", gap: 6 }}>
+                    <span style={{ fontSize: 11, color: "rgba(255, 255, 255, 0.5)", fontWeight: 500 }}>Stroke Color</span>
+                    <div style={{ display: "flex", gap: 6, alignItems: "center" }}>
+                        {["#ffffff", "#ef4444", "#22c55e", "#3b82f6", "#eab308"].map(c => (
+                            <button
+                                key={c}
+                                onClick={() => game?.updateSelectedShapeStyle({ strokeColor: c })}
+                                style={{
+                                    width: 20,
+                                    height: 20,
+                                    borderRadius: "50%",
+                                    background: c,
+                                    border: (selectedShape.style?.strokeColor || "#ffffff") === c ? "2px solid #3b82f6" : "1px solid rgba(255, 255, 255, 0.2)",
+                                    cursor: "pointer",
+                                    padding: 0
+                                }}
+                            />
+                        ))}
+                        <input
+                            type="color"
+                            value={selectedShape.style?.strokeColor || "#ffffff"}
+                            onChange={(e) => game?.updateSelectedShapeStyle({ strokeColor: e.target.value })}
+                            style={{
+                                width: 22,
+                                height: 22,
+                                border: "none",
+                                padding: 0,
+                                background: "none",
+                                cursor: "pointer",
+                            }}
+                        />
+                    </div>
+                </div>
+
+                {/* Background (Fill) Color */}
+                <div style={{ display: "flex", flexDirection: "column", gap: 6 }}>
+                    <span style={{ fontSize: 11, color: "rgba(255, 255, 255, 0.5)", fontWeight: 500 }}>Background Color</span>
+                    <div style={{ display: "flex", gap: 6, alignItems: "center" }}>
+                        <button
+                            onClick={() => game?.updateSelectedShapeStyle({ fillColor: "transparent" })}
+                            style={{
+                                width: 20,
+                                height: 20,
+                                borderRadius: "50%",
+                                background: "transparent",
+                                border: (selectedShape.style?.fillColor || "transparent") === "transparent" ? "2px solid #3b82f6" : "1px solid rgba(255, 255, 255, 0.2)",
+                                cursor: "pointer",
+                                position: "relative",
+                                overflow: "hidden",
+                                padding: 0
+                            }}
+                        >
+                            <span style={{
+                                position: "absolute",
+                                top: 0,
+                                left: 8,
+                                width: 2,
+                                height: 20,
+                                background: "#ef4444",
+                                transform: "rotate(45deg)",
+                            }} />
+                        </button>
+                        {["rgba(239, 68, 68, 0.3)", "rgba(34, 197, 94, 0.3)", "rgba(59, 130, 246, 0.3)", "rgba(234, 179, 8, 0.3)"].map(c => (
+                            <button
+                                key={c}
+                                onClick={() => game?.updateSelectedShapeStyle({ fillColor: c })}
+                                style={{
+                                    width: 20,
+                                    height: 20,
+                                    borderRadius: "50%",
+                                    background: c,
+                                    border: (selectedShape.style?.fillColor || "transparent") === c ? "2px solid #3b82f6" : "1px solid rgba(255, 255, 255, 0.2)",
+                                    cursor: "pointer",
+                                    padding: 0
+                                }}
+                            />
+                        ))}
+                        <input
+                            type="color"
+                            value={selectedShape.style?.fillColor && selectedShape.style.fillColor !== "transparent" ? selectedShape.style.fillColor : "#000000"}
+                            onChange={(e) => game?.updateSelectedShapeStyle({ fillColor: e.target.value })}
+                            style={{
+                                width: 22,
+                                height: 22,
+                                border: "none",
+                                padding: 0,
+                                background: "none",
+                                cursor: "pointer",
+                            }}
+                        />
+                    </div>
+                </div>
+
+                {/* Stroke Width */}
+                <div style={{ display: "flex", flexDirection: "column", gap: 6 }}>
+                    <div style={{ display: "flex", justifyContent: "space-between", fontSize: 11, color: "rgba(255, 255, 255, 0.5)", fontWeight: 500 }}>
+                        <span>Stroke Width</span>
+                        <span style={{ color: "white" }}>{selectedShape.style?.strokeWidth ?? 2}px</span>
+                    </div>
+                    <input
+                        type="range"
+                        min="1"
+                        max="10"
+                        value={selectedShape.style?.strokeWidth ?? 2}
+                        onChange={(e) => game?.updateSelectedShapeStyle({ strokeWidth: Number(e.target.value) })}
+                        style={{ cursor: "pointer", width: "100%" }}
+                    />
+                </div>
+
+                {/* Opacity */}
+                <div style={{ display: "flex", flexDirection: "column", gap: 6 }}>
+                    <div style={{ display: "flex", justifyContent: "space-between", fontSize: 11, color: "rgba(255, 255, 255, 0.5)", fontWeight: 500 }}>
+                        <span>Opacity</span>
+                        <span style={{ color: "white" }}>{Math.round((selectedShape.style?.opacity ?? 1) * 100)}%</span>
+                    </div>
+                    <input
+                        type="range"
+                        min="0.1"
+                        max="1"
+                        step="0.05"
+                        value={selectedShape.style?.opacity ?? 1}
+                        onChange={(e) => game?.updateSelectedShapeStyle({ opacity: Number(e.target.value) })}
+                        style={{ cursor: "pointer", width: "100%" }}
+                    />
+                </div>
+
+                {/* Stroke Style */}
+                <div style={{ display: "flex", flexDirection: "column", gap: 6 }}>
+                    <span style={{ fontSize: 11, color: "rgba(255, 255, 255, 0.5)", fontWeight: 500 }}>Stroke Style</span>
+                    <div style={{ display: "flex", gap: 6 }}>
+                        {(["solid", "dashed", "dotted"] as const).map(s => {
+                            const isSelected = (selectedShape.style?.strokeStyle || "solid") === s;
+                            return (
+                                <button
+                                    key={s}
+                                    onClick={() => game?.updateSelectedShapeStyle({ strokeStyle: s })}
+                                    style={{
+                                        flex: 1,
+                                        padding: "6px 0",
+                                        borderRadius: 6,
+                                        background: isSelected ? "rgba(59, 130, 246, 0.2)" : "rgba(255, 255, 255, 0.05)",
+                                        border: isSelected ? "1px solid #3b82f6" : "1px solid rgba(255, 255, 255, 0.1)",
+                                        color: isSelected ? "#60a5fa" : "rgba(255, 255, 255, 0.8)",
+                                        fontSize: 10,
+                                        fontWeight: 600,
+                                        cursor: "pointer",
+                                        textTransform: "capitalize",
+                                    }}
+                                >
+                                    {s}
+                                </button>
+                            );
+                        })}
+                    </div>
+                </div>
+
+                {/* Roughness (Hand-drawn feel) */}
+                <div style={{ display: "flex", flexDirection: "column", gap: 6 }}>
+                    <span style={{ fontSize: 11, color: "rgba(255, 255, 255, 0.5)", fontWeight: 500 }}>Sloppiness (Roughness)</span>
+                    <div style={{ display: "flex", gap: 6 }}>
+                        {[
+                            { label: "Clean", val: 0 },
+                            { label: "Sketchy", val: 1 },
+                            { label: "Artist", val: 2 },
+                        ].map(r => {
+                            const isSelected = (selectedShape.style?.roughness ?? 0) === r.val;
+                            return (
+                                <button
+                                    key={r.val}
+                                    onClick={() => game?.updateSelectedShapeStyle({ roughness: r.val })}
+                                    style={{
+                                        flex: 1,
+                                        padding: "6px 0",
+                                        borderRadius: 6,
+                                        background: isSelected ? "rgba(59, 130, 246, 0.2)" : "rgba(255, 255, 255, 0.05)",
+                                        border: isSelected ? "1px solid #3b82f6" : "1px solid rgba(255, 255, 255, 0.1)",
+                                        color: isSelected ? "#60a5fa" : "rgba(255, 255, 255, 0.8)",
+                                        fontSize: 10,
+                                        fontWeight: 600,
+                                        cursor: "pointer",
+                                    }}
+                                >
+                                    {r.label}
+                                </button>
+                            );
+                        })}
+                    </div>
+                </div>
+            </div>
+        )}
     </div>
 }
 
@@ -80,6 +303,15 @@ function Topbar({selectedTool, setSelectedTool}: {
                 <IconButton onClick={() => {
                     setSelectedTool("circle")
                 }} activated={selectedTool === "circle"} icon={<Circle />}></IconButton>
+                <IconButton onClick={() => {
+                    setSelectedTool("line")
+                }} activated={selectedTool === "line"} icon={<Minus />}></IconButton>
+                <IconButton onClick={() => {
+                    setSelectedTool("arrow")
+                }} activated={selectedTool === "arrow"} icon={<ArrowRight />}></IconButton>
+                <IconButton onClick={() => {
+                    setSelectedTool("text")
+                }} activated={selectedTool === "text"} icon={<Type />}></IconButton>
             </div>
         </div>
 }

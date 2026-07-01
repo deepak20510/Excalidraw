@@ -1,24 +1,6 @@
 import { HTTP_BACKEND } from "@/config";
 import axios from "axios";
-
-type Shape =
-  | {
-      type: "rect";
-      x: number;
-      y: number;
-      width: number;
-      height: number;
-    }
-  | {
-      type: "circle";
-      centerX: number;
-      centerY: number;
-      radius: number;
-    }
-  | {
-      type: "pencil";
-      points: { x: number; y: number }[];
-    };
+import { Shape } from "./Game";
 
 type ChatMessage = {
   message: string;
@@ -67,6 +49,23 @@ function isShape(value: unknown): value is Shape {
           typeof (p as Record<string, unknown>).x === "number" &&
           typeof (p as Record<string, unknown>).y === "number",
       )
+    );
+  }
+
+  if (shape.type === "line" || shape.type === "arrow") {
+    return (
+      typeof shape.x1 === "number" &&
+      typeof shape.y1 === "number" &&
+      typeof shape.x2 === "number" &&
+      typeof shape.y2 === "number"
+    );
+  }
+
+  if (shape.type === "text") {
+    return (
+      typeof shape.x === "number" &&
+      typeof shape.y === "number" &&
+      typeof shape.text === "string"
     );
   }
 

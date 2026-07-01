@@ -167,8 +167,8 @@ wss.on("connection", async function connection(ws, request) {
         });
       }
 
-      // Relay ephemeral mutation messages (delete, move, undo, redo)
-      // to other users in the same room without persisting to DB
+      // Relay mutation messages (delete, move, undo, redo)
+      // and persist the updated shape list to the database
       if (
         parsedData.type === "delete_shape" ||
         parsedData.type === "move_shape" ||
@@ -179,6 +179,27 @@ wss.on("connection", async function connection(ws, request) {
         if (!roomId) {
           return;
         }
+
+        // Persist the full shape list to the database if provided
+        if (Array.isArray(parsedData.shapes)) {
+          try {
+            await PrismaClient.$transaction([
+              PrismaClient.chat.deleteMany({
+                where: { roomId },
+              }),
+              PrismaClient.chat.createMany({
+                data: parsedData.shapes.map((shape: any) => ({
+                  roomId,
+                  message: JSON.stringify({ shape }),
+                  userId,
+                })),
+              }),
+            ]);
+          } catch (err) {
+            console.error("Failed to sync shapes in DB:", err);
+          }
+        }
+
         users.forEach((user) => {
           if (
             user.ws !== ws &&
