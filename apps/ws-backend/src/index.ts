@@ -153,6 +153,10 @@ wss.on("connection", async function connection(ws, request) {
           },
         });
         users.forEach((user) => {
+          if (user.ws === ws) {
+            return;
+          }
+
           if (user.rooms.includes(String(roomId))) {
             if (user.ws.readyState === WebSocket.OPEN) {
               user.ws.send(

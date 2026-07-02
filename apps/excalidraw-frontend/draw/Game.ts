@@ -1,5 +1,6 @@
 import type { Tool } from "@/components/Canvas";
 import { getExistingShapes } from "./http";
+import rough from "roughjs";
 
 export type ShapeStyle = {
   strokeColor: string;
@@ -12,52 +13,53 @@ export type ShapeStyle = {
 
 export type Shape =
   | {
-    type: "rect";
-    x: number;
-    y: number;
-    width: number;
-    height: number;
-    style?: ShapeStyle;
-  }
+      type: "rect";
+      x: number;
+      y: number;
+      width: number;
+      height: number;
+      style?: ShapeStyle;
+    }
   | {
-    type: "circle";
-    centerX: number;
-    centerY: number;
-    radius: number;
-    style?: ShapeStyle;
-  }
+      type: "circle";
+      centerX: number;
+      centerY: number;
+      radius: number;
+      style?: ShapeStyle;
+    }
   | {
-    type: "pencil";
-    points: { x: number; y: number }[];
-    style?: ShapeStyle;
-  }
+      type: "pencil";
+      points: { x: number; y: number }[];
+      style?: ShapeStyle;
+    }
   | {
-    type: "line";
-    x1: number;
-    y1: number;
-    x2: number;
-    y2: number;
-    style?: ShapeStyle;
-  }
+      type: "line";
+      x1: number;
+      y1: number;
+      x2: number;
+      y2: number;
+      style?: ShapeStyle;
+    }
   | {
-    type: "arrow";
-    x1: number;
-    y1: number;
-    x2: number;
-    y2: number;
-    style?: ShapeStyle;
-  }
+      type: "arrow";
+      x1: number;
+      y1: number;
+      x2: number;
+      y2: number;
+      style?: ShapeStyle;
+    }
   | {
-    type: "text";
-    x: number;
-    y: number;
-    text: string;
-    style?: ShapeStyle;
-  };
+      type: "text";
+      x: number;
+      y: number;
+      text: string;
+      style?: ShapeStyle;
+    };
 
 export class Game {
   private canvas: HTMLCanvasElement;
   private ctx: CanvasRenderingContext2D;
+  private roughCanvas: ReturnType<typeof rough.canvas> | null = null;
   private existingShapes: Shape[];
   private roomId: string;
   private clicked: boolean;
@@ -80,7 +82,7 @@ export class Game {
     strokeWidth: 2,
     opacity: 1,
     strokeStyle: "solid",
-    roughness: 0,
+    roughness: 1,
   };
 
   // Infinite canvas state
@@ -101,6 +103,7 @@ export class Game {
   constructor(canvas: HTMLCanvasElement, roomId: string, socket: WebSocket) {
     this.canvas = canvas;
     this.ctx = canvas.getContext("2d")!;
+    this.roughCanvas = rough.canvas(canvas);
     this.existingShapes = [];
     this.roomId = roomId;
     this.socket = socket;
@@ -147,11 +150,11 @@ export class Game {
           strokeWidth: 2,
           opacity: 1,
           strokeStyle: "solid",
-          roughness: 0,
+          roughness: 1,
         };
       }
       shape.style = { ...shape.style, ...properties };
-      
+
       // Also update activeStyle so next drawn shape matches
       this.activeStyle = { ...this.activeStyle, ...properties };
 
@@ -194,19 +197,21 @@ export class Game {
   private pushHistory() {
     // Discard any future states beyond the current pointer
     this.history = this.history.slice(0, this.historyPointer + 1);
-    this.history.push(this.existingShapes.map((s) => {
-      if (s.type === "pencil") {
+    this.history.push(
+      this.existingShapes.map((s) => {
+        if (s.type === "pencil") {
+          return {
+            type: "pencil" as const,
+            points: s.points.map((p) => ({ ...p })),
+            style: s.style ? { ...s.style } : undefined,
+          };
+        }
         return {
-          type: "pencil" as const,
-          points: s.points.map((p) => ({ ...p })),
+          ...s,
           style: s.style ? { ...s.style } : undefined,
         };
-      }
-      return {
-        ...s,
-        style: s.style ? { ...s.style } : undefined,
-      };
-    }));
+      }),
+    );
     this.historyPointer = this.history.length - 1;
   }
 
@@ -261,11 +266,7 @@ export class Game {
         } else if (message.type === "move_shape") {
           const index = message.shapeIndex as number;
           const movedShape = message.shape;
-          if (
-            index >= 0 &&
-            index < this.existingShapes.length &&
-            movedShape
-          ) {
+          if (index >= 0 && index < this.existingShapes.length && movedShape) {
             this.existingShapes[index] = movedShape;
             // Update selected shape reference if it was the one moved
             if (this.selectedShapeIndex === index) {
@@ -290,7 +291,12 @@ export class Game {
   }
 
   /** Get bounding box for any shape (in world coordinates) */
-  private getShapeBounds(shape: Shape): { minX: number; minY: number; maxX: number; maxY: number } {
+  private getShapeBounds(shape: Shape): {
+    minX: number;
+    minY: number;
+    maxX: number;
+    maxY: number;
+  } {
     if (shape.type === "rect") {
       const minX = Math.min(shape.x, shape.x + shape.width);
       const maxX = Math.max(shape.x, shape.x + shape.width);
@@ -327,7 +333,10 @@ export class Game {
       };
     } else {
       // pencil — bounding box of all points
-      let minX = Infinity, minY = Infinity, maxX = -Infinity, maxY = -Infinity;
+      let minX = Infinity,
+        minY = Infinity,
+        maxX = -Infinity,
+        maxY = -Infinity;
       for (const p of shape.points) {
         if (p.x < minX) minX = p.x;
         if (p.y < minY) minY = p.y;
@@ -342,17 +351,36 @@ export class Game {
   private hitTestShape(shape: Shape, wx: number, wy: number): boolean {
     if (shape.type === "rect") {
       const bounds = this.getShapeBounds(shape);
-      return wx >= bounds.minX && wx <= bounds.maxX && wy >= bounds.minY && wy <= bounds.maxY;
+      return (
+        wx >= bounds.minX &&
+        wx <= bounds.maxX &&
+        wy >= bounds.minY &&
+        wy <= bounds.maxY
+      );
     } else if (shape.type === "circle") {
       const dx = wx - shape.centerX;
       const dy = wy - shape.centerY;
       return dx * dx + dy * dy <= shape.radius * shape.radius;
     } else if (shape.type === "line" || shape.type === "arrow") {
       const tolerance = 6 / this.scale;
-      return this.pointToSegmentDist(wx, wy, shape.x1, shape.y1, shape.x2, shape.y2) <= tolerance;
+      return (
+        this.pointToSegmentDist(
+          wx,
+          wy,
+          shape.x1,
+          shape.y1,
+          shape.x2,
+          shape.y2,
+        ) <= tolerance
+      );
     } else if (shape.type === "text") {
       const bounds = this.getShapeBounds(shape);
-      return wx >= bounds.minX && wx <= bounds.maxX && wy >= bounds.minY && wy <= bounds.maxY;
+      return (
+        wx >= bounds.minX &&
+        wx <= bounds.maxX &&
+        wy >= bounds.minY &&
+        wy <= bounds.maxY
+      );
     } else {
       // pencil — check proximity to any segment (within 6 world-px tolerance)
       const tolerance = 6 / this.scale;
@@ -368,7 +396,14 @@ export class Game {
   }
 
   /** Distance from point (px, py) to line segment (ax, ay)-(bx, by) */
-  private pointToSegmentDist(px: number, py: number, ax: number, ay: number, bx: number, by: number): number {
+  private pointToSegmentDist(
+    px: number,
+    py: number,
+    ax: number,
+    ay: number,
+    bx: number,
+    by: number,
+  ): number {
     const dx = bx - ax;
     const dy = by - ay;
     const lenSq = dx * dx + dy * dy;
@@ -438,7 +473,12 @@ export class Game {
   }
 
   /** Draw an arrowhead at (tipX, tipY) pointing from (fromX, fromY) */
-  private drawArrowhead(fromX: number, fromY: number, tipX: number, tipY: number) {
+  private drawArrowhead(
+    fromX: number,
+    fromY: number,
+    tipX: number,
+    tipY: number,
+  ) {
     const headLength = 12 / this.scale;
     const angle = Math.atan2(tipY - fromY, tipX - fromX);
     this.ctx.beginPath();
@@ -455,92 +495,16 @@ export class Game {
     this.ctx.stroke();
   }
 
-  /** Draw a sketchy line between (x1, y1) and (x2, y2) with specified roughness */
-  private drawSketchyLine(x1: number, y1: number, x2: number, y2: number, roughness: number) {
-    const offset = () => (Math.random() - 0.5) * roughness * 2.5;
-    for (let s = 0; s < 2; s++) {
-      this.ctx.beginPath();
-      this.ctx.moveTo(x1 + offset(), y1 + offset());
-      const midX = (x1 + x2) / 2 + offset() * 0.5;
-      const midY = (y1 + y2) / 2 + offset() * 0.5;
-      this.ctx.quadraticCurveTo(midX, midY, x2 + offset(), y2 + offset());
-      this.ctx.stroke();
-    }
-  }
-
-  /** Draw a sketchy rect with specified roughness */
-  private drawSketchyRect(x: number, y: number, w: number, h: number, roughness: number) {
-    this.drawSketchyLine(x, y, x + w, y, roughness);
-    this.drawSketchyLine(x + w, y, x + w, y + h, roughness);
-    this.drawSketchyLine(x + w, y + h, x, y + h, roughness);
-    this.drawSketchyLine(x, y + h, x, y, roughness);
-  }
-
-  /** Draw a sketchy circle with specified roughness */
-  private drawSketchyCircle(cx: number, cy: number, r: number, roughness: number) {
-    const offset = () => (Math.random() - 0.5) * roughness * 2;
-    for (let s = 0; s < 2; s++) {
-      this.ctx.beginPath();
-      const steps = Math.max(12, Math.min(36, Math.floor(r / 2)));
-      for (let i = 0; i <= steps; i++) {
-        const angle = (i / steps) * Math.PI * 2;
-        const x = cx + Math.cos(angle) * r + offset();
-        const y = cy + Math.sin(angle) * r + offset();
-        if (i === 0) {
-          this.ctx.moveTo(x, y);
-        } else {
-          this.ctx.lineTo(x, y);
-        }
-      }
-      this.ctx.stroke();
-    }
-  }
-
-  /** Draw a sketchy pencil shape with specified roughness */
-  private drawSketchyPencil(points: { x: number; y: number }[], roughness: number) {
-    if (points.length < 2) return;
-    const offset = () => (Math.random() - 0.5) * roughness * 1.5;
-    for (let s = 0; s < 2; s++) {
-      this.ctx.beginPath();
-      this.ctx.moveTo(points[0]!.x + offset(), points[0]!.y + offset());
-      for (let i = 1; i < points.length; i++) {
-        this.ctx.lineTo(points[i]!.x + offset(), points[i]!.y + offset());
-      }
-      this.ctx.stroke();
-    }
-  }
-
-  /** Draw a sketchy arrowhead at (tipX, tipY) pointing from (fromX, fromY) with specified roughness */
-  private drawSketchyArrowhead(fromX: number, fromY: number, tipX: number, tipY: number, roughness: number) {
-    const headLength = 12 / this.scale;
-    const angle = Math.atan2(tipY - fromY, tipX - fromX);
-    const offset = () => (Math.random() - 0.5) * roughness * 1.5;
-
-    for (let s = 0; s < 2; s++) {
-      this.ctx.beginPath();
-      this.ctx.moveTo(tipX + offset(), tipY + offset());
-      this.ctx.lineTo(
-        tipX - headLength * Math.cos(angle - Math.PI / 6) + offset(),
-        tipY - headLength * Math.sin(angle - Math.PI / 6) + offset(),
-      );
-      this.ctx.stroke();
-
-      this.ctx.beginPath();
-      this.ctx.moveTo(tipX + offset(), tipY + offset());
-      this.ctx.lineTo(
-        tipX - headLength * Math.cos(angle + Math.PI / 6) + offset(),
-        tipY - headLength * Math.sin(angle + Math.PI / 6) + offset(),
-      );
-      this.ctx.stroke();
-    }
-  }
-
   clearCanvas() {
     // Reset transform to identity so clearRect covers the whole physical canvas
     this.ctx.setTransform(1, 0, 0, 1, 0, 0);
     this.ctx.clearRect(0, 0, this.canvas.width, this.canvas.height);
     this.ctx.fillStyle = "rgba(0, 0, 0)";
     this.ctx.fillRect(0, 0, this.canvas.width, this.canvas.height);
+
+    // Initialize or reuse the RoughJS canvas instance
+    const rc =
+      this.roughCanvas ?? (this.roughCanvas = rough.canvas(this.canvas));
 
     // Apply pan + zoom transform for all shape drawing
     this.ctx.save();
@@ -587,35 +551,64 @@ export class Game {
 
       this.ctx.fillStyle = style.fillColor;
 
+      // Build RoughJS options
+      const strokeLineDash =
+        style.strokeStyle === "dashed"
+          ? [10, 5]
+          : style.strokeStyle === "dotted"
+            ? [2, 4]
+            : undefined;
+
+      const roughOptions = {
+        roughness:
+          style.roughness === 1 ? 1.5 : style.roughness === 2 ? 2.8 : 0,
+        stroke:
+          index === this.selectedShapeIndex
+            ? "rgba(59, 130, 246, 1)"
+            : style.strokeColor,
+        strokeWidth:
+          index === this.selectedShapeIndex
+            ? Math.max(2, style.strokeWidth + 1)
+            : style.strokeWidth,
+        fill: style.fillColor === "transparent" ? undefined : style.fillColor,
+        fillStyle: "solid",
+        strokeLineDash,
+      };
+
       if (shape.type === "rect") {
-        // Draw fill first if not transparent
-        if (style.fillColor !== "transparent") {
-          this.ctx.fillRect(shape.x, shape.y, shape.width, shape.height);
-        }
-        // Draw stroke
         if (style.roughness > 0) {
-          this.drawSketchyRect(shape.x, shape.y, shape.width, shape.height, style.roughness);
+          rc.rectangle(
+            shape.x,
+            shape.y,
+            shape.width,
+            shape.height,
+            roughOptions,
+          );
         } else {
+          // Draw fill first if not transparent
+          if (style.fillColor !== "transparent") {
+            this.ctx.fillRect(shape.x, shape.y, shape.width, shape.height);
+          }
           this.ctx.strokeRect(shape.x, shape.y, shape.width, shape.height);
         }
       } else if (shape.type === "circle") {
-        // Draw fill first if not transparent
-        if (style.fillColor !== "transparent") {
-          this.ctx.beginPath();
-          this.ctx.arc(
-            shape.centerX,
-            shape.centerY,
-            Math.abs(shape.radius),
-            0,
-            Math.PI * 2,
-          );
-          this.ctx.fill();
-          this.ctx.closePath();
-        }
-        // Draw stroke
         if (style.roughness > 0) {
-          this.drawSketchyCircle(shape.centerX, shape.centerY, Math.abs(shape.radius), style.roughness);
+          const diameter = Math.abs(shape.radius) * 2;
+          rc.circle(shape.centerX, shape.centerY, diameter, roughOptions);
         } else {
+          // Draw fill first if not transparent
+          if (style.fillColor !== "transparent") {
+            this.ctx.beginPath();
+            this.ctx.arc(
+              shape.centerX,
+              shape.centerY,
+              Math.abs(shape.radius),
+              0,
+              Math.PI * 2,
+            );
+            this.ctx.fill();
+            this.ctx.closePath();
+          }
           this.ctx.beginPath();
           this.ctx.arc(
             shape.centerX,
@@ -628,14 +621,15 @@ export class Game {
           this.ctx.closePath();
         }
       } else if (shape.type === "pencil") {
-        if (style.roughness > 0) {
-          this.drawSketchyPencil(shape.points, style.roughness);
+        if (style.roughness > 0 && shape.points.length >= 2) {
+          const pts = shape.points.map((p) => [p.x, p.y] as [number, number]);
+          rc.curve(pts, roughOptions);
         } else {
           this.drawPencilShape(shape.points);
         }
       } else if (shape.type === "line") {
         if (style.roughness > 0) {
-          this.drawSketchyLine(shape.x1, shape.y1, shape.x2, shape.y2, style.roughness);
+          rc.line(shape.x1, shape.y1, shape.x2, shape.y2, roughOptions);
         } else {
           this.ctx.beginPath();
           this.ctx.moveTo(shape.x1, shape.y1);
@@ -644,8 +638,16 @@ export class Game {
         }
       } else if (shape.type === "arrow") {
         if (style.roughness > 0) {
-          this.drawSketchyLine(shape.x1, shape.y1, shape.x2, shape.y2, style.roughness);
-          this.drawSketchyArrowhead(shape.x1, shape.y1, shape.x2, shape.y2, style.roughness);
+          const headLength = 12 / this.scale;
+          const angle = Math.atan2(shape.y2 - shape.y1, shape.x2 - shape.x1);
+          const wing1X = shape.x2 - headLength * Math.cos(angle - Math.PI / 6);
+          const wing1Y = shape.y2 - headLength * Math.sin(angle - Math.PI / 6);
+          const wing2X = shape.x2 - headLength * Math.cos(angle + Math.PI / 6);
+          const wing2Y = shape.y2 - headLength * Math.sin(angle + Math.PI / 6);
+
+          rc.line(shape.x1, shape.y1, shape.x2, shape.y2, roughOptions);
+          rc.line(shape.x2, shape.y2, wing1X, wing1Y, roughOptions);
+          rc.line(shape.x2, shape.y2, wing2X, wing2Y, roughOptions);
         } else {
           this.ctx.beginPath();
           this.ctx.moveTo(shape.x1, shape.y1);
@@ -654,7 +656,10 @@ export class Game {
           this.drawArrowhead(shape.x1, shape.y1, shape.x2, shape.y2);
         }
       } else if (shape.type === "text") {
-        this.ctx.fillStyle = index === this.selectedShapeIndex ? "rgba(59, 130, 246, 1)" : style.strokeColor;
+        this.ctx.fillStyle =
+          index === this.selectedShapeIndex
+            ? "rgba(59, 130, 246, 1)"
+            : style.strokeColor;
         this.ctx.font = "20px sans-serif";
         this.ctx.textBaseline = "alphabetic";
         this.ctx.fillText(shape.text, shape.x, shape.y);
