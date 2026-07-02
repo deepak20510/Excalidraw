@@ -13,10 +13,31 @@ import cors from "cors";
 
 const app = express();
 app.use(express.json());
-app.use(cors());
+
+const defaultCorsOrigins = ["http://localhost:3000", "http://localhost:3001"];
+const configuredCorsOrigins =
+  process.env.CORS_ORIGIN?.split(",")
+    .map((origin) => origin.trim())
+    .filter(Boolean) ?? [];
+const corsOrigins =
+  configuredCorsOrigins.length > 0 ? configuredCorsOrigins : defaultCorsOrigins;
+
+app.use(
+  cors({
+    origin: corsOrigins,
+    credentials: true,
+  }),
+);
+
 const DEFAULT_PORT = 3001;
 const FALLBACK_PORT = 3101;
-const configuredPort = Number(process.env.HTTP_PORT ?? DEFAULT_PORT);
+const configuredPort = Number(
+  process.env.PORT ?? process.env.HTTP_PORT ?? DEFAULT_PORT,
+);
+
+app.get("/health", (_req, res) => {
+  res.status(200).json({ status: "ok" });
+});
 
 app.post("/signup", async (req, res) => {
   const parseData = CreateUserSchema.safeParse(req.body);
@@ -68,7 +89,10 @@ app.post("/signin", async (req, res) => {
       return;
     }
 
-    const passwordMatch = await bcrypt.compare(data.data.password, user.password);
+    const passwordMatch = await bcrypt.compare(
+      data.data.password,
+      user.password,
+    );
     if (!passwordMatch) {
       res.status(403).json({
         message: "Invalid credentials",
@@ -147,8 +171,8 @@ app.get("/room/:slug", async (req, res) => {
 });
 
 function startServer(port: number) {
-  const server = app.listen(port, () => {
-    console.log(`http-backend listening on http://localhost:${port}`);
+  const server = app.listen(port, "0.0.0.0", () => {
+    console.log(`http-backend listening on port ${port}`);
   });
 
   server.once("error", (error: NodeJS.ErrnoException) => {

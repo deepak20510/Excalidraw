@@ -1,5 +1,6 @@
 packages:
   - "apps/http-backend"
   - "apps/web"
+  - "apps/excalidraw-frontend"
   - "apps/ws-backend"
   - "packages/*"
