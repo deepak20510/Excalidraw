@@ -4,7 +4,10 @@
   "description": "",
   "main": "index.js",
   "exports": {
-    "./client": "./dist/index.js"
+    "./client": {
+      "types": "./dist/index.d.ts",
+      "default": "./dist/index.js"
+    }
   },
   "scripts": {
     "build": "tsc -b && node -e \"const fs = require('fs'); fs.cpSync('src/generated', 'dist/generated', { recursive: true });\"",

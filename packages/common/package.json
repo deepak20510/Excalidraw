@@ -2,7 +2,10 @@
   "name": "@repo/common",
   "version": "1.0.0",
   "exports": {
-    "./types": "./dist/types.js"
+    "./types": {
+      "types": "./dist/types.d.ts",
+      "default": "./dist/types.js"
+    }
   },
   "description": "",
   "main": "index.js",

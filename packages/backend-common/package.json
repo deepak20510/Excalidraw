@@ -4,7 +4,10 @@
   "description": "",
   "main": "index.js",
   "exports": {
-    "./config": "./dist/index.js"
+    "./config": {
+      "types": "./dist/index.d.ts",
+      "default": "./dist/index.js"
+    }
   },
   "scripts": {
     "build": "tsc -b",
