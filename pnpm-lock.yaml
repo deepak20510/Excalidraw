@@ -159,12 +159,18 @@ importers:
       '@repo/backend-common':
         specifier: workspace:*
         version: link:../../packages/backend-common
+      '@repo/common':
+        specifier: workspace:*
+        version: link:../../packages/common
       '@repo/db':
         specifier: workspace:*
         version: link:../../packages/db
       '@types/jsonwebtoken':
         specifier: ^9.0.10
         version: 9.0.10
+      '@types/ws':
+        specifier: ^8.18.1
+        version: 8.18.1
       jsonwebtoken:
         specifier: ^9.0.3
         version: 9.0.3
@@ -172,15 +178,9 @@ importers:
         specifier: ^8.21.0
         version: 8.21.0
     devDependencies:
-      '@repo/common':
-        specifier: workspace:*
-        version: link:../../packages/common
       '@repo/typescript-config':
         specifier: workspace:*
         version: link:../../packages/typescript-config
-      '@types/ws':
-        specifier: ^8.18.1
-        version: 8.18.1
 
   packages/backend-common:
     dependencies:
