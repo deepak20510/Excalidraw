@@ -9,9 +9,12 @@
     "dev": "npm run build && npm run start"
   },
   "dependencies": {
+    "@repo/backend-common": "workspace:*",
+    "@repo/common": "workspace:*",
     "@repo/db": "workspace:*",
     "@types/bcryptjs": "^3.0.0",
     "@types/cors": "^2.8.19",
+    "@types/express": "^5.0.6",
     "@types/jsonwebtoken": "^9.0.10",
     "bcryptjs": "^3.0.3",
     "cors": "^2.8.6",
@@ -19,10 +22,7 @@
     "jsonwebtoken": "^9.0.3"
   },
   "devDependencies": {
-    "@repo/backend-common": "workspace:*",
-    "@repo/common": "workspace:*",
-    "@repo/typescript-config": "workspace:*",
-    "@types/express": "^5.0.6"
+    "@repo/typescript-config": "workspace:*"
   },
   "keywords": [],
   "author": "",
