@@ -12,6 +12,10 @@ import { PrismaClient } from "@repo/db/client";
 import cors from "cors";
 
 const app = express();
+app.use((req, _res, next) => {
+  console.log(req.method, req.url, req.headers.origin);
+  next();
+});
 app.use(express.json());
 
 const defaultCorsOrigins = ["http://localhost:3000", "http://localhost:3001"];
@@ -19,8 +23,7 @@ const configuredCorsOrigins =
   process.env.CORS_ORIGIN?.split(",")
     .map((origin) => origin.trim())
     .filter(Boolean) ?? [];
-const corsOrigins =
-  configuredCorsOrigins.length > 0 ? configuredCorsOrigins : defaultCorsOrigins;
+const corsOrigins = [...defaultCorsOrigins, ...configuredCorsOrigins];
 
 app.use(
   cors({
@@ -32,7 +35,7 @@ app.use(
 const DEFAULT_PORT = 3001;
 const FALLBACK_PORT = 3101;
 const configuredPort = Number(
-  process.env.PORT ?? process.env.HTTP_PORT ?? DEFAULT_PORT,
+  process.env.HTTP_PORT ?? process.env.PORT ?? DEFAULT_PORT,
 );
 
 app.get("/health", (_req, res) => {

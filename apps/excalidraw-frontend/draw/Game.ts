@@ -120,6 +120,7 @@ export class Game {
     this.canvas.removeEventListener("wheel", this.wheelHandler);
     window.removeEventListener("keydown", this.keyDownHandler);
     window.removeEventListener("keyup", this.keyUpHandler);
+    this.socket.removeEventListener("message", this.messageListener);
   }
 
   private triggerSelectionCallback() {
@@ -235,51 +236,53 @@ export class Game {
     }
   }
 
-  initHandlers() {
-    this.socket.onmessage = (event: MessageEvent<string>) => {
-      if (typeof event.data !== "string") {
-        return;
-      }
+  private messageListener = (event: MessageEvent<any>) => {
+    if (typeof event.data !== "string") {
+      return;
+    }
 
-      try {
-        const message = JSON.parse(event.data);
-        if (message.type === "chat") {
-          const parsedShape = JSON.parse(message.message);
-          if (parsedShape.shape) {
-            this.existingShapes.push(parsedShape.shape);
-            this.pushHistory();
-            this.clearCanvas();
-          }
-        } else if (message.type === "undo") {
-          this.undo();
-        } else if (message.type === "redo") {
-          this.redo();
-        } else if (message.type === "delete_shape") {
-          const index = message.shapeIndex as number;
-          if (index >= 0 && index < this.existingShapes.length) {
-            this.existingShapes.splice(index, 1);
-            this.selectedShapeIndex = null;
-            this.triggerSelectionCallback();
-            this.pushHistory();
-            this.clearCanvas();
-          }
-        } else if (message.type === "move_shape") {
-          const index = message.shapeIndex as number;
-          const movedShape = message.shape;
-          if (index >= 0 && index < this.existingShapes.length && movedShape) {
-            this.existingShapes[index] = movedShape;
-            // Update selected shape reference if it was the one moved
-            if (this.selectedShapeIndex === index) {
-              this.triggerSelectionCallback();
-            }
-            this.pushHistory();
-            this.clearCanvas();
-          }
+    try {
+      const message = JSON.parse(event.data);
+      if (message.type === "chat") {
+        const parsedShape = JSON.parse(message.message);
+        if (parsedShape.shape) {
+          this.existingShapes.push(parsedShape.shape);
+          this.pushHistory();
+          this.clearCanvas();
         }
-      } catch (e) {
-        console.error("Error parsing WS message:", e);
+      } else if (message.type === "undo") {
+        this.undo();
+      } else if (message.type === "redo") {
+        this.redo();
+      } else if (message.type === "delete_shape") {
+        const index = message.shapeIndex as number;
+        if (index >= 0 && index < this.existingShapes.length) {
+          this.existingShapes.splice(index, 1);
+          this.selectedShapeIndex = null;
+          this.triggerSelectionCallback();
+          this.pushHistory();
+          this.clearCanvas();
+        }
+      } else if (message.type === "move_shape") {
+        const index = message.shapeIndex as number;
+        const movedShape = message.shape;
+        if (index >= 0 && index < this.existingShapes.length && movedShape) {
+          this.existingShapes[index] = movedShape;
+          // Update selected shape reference if it was the one moved
+          if (this.selectedShapeIndex === index) {
+            this.triggerSelectionCallback();
+          }
+          this.pushHistory();
+          this.clearCanvas();
+        }
       }
-    };
+    } catch (e) {
+      console.error("Error parsing WS message:", e);
+    }
+  };
+
+  initHandlers() {
+    this.socket.addEventListener("message", this.messageListener);
   }
 
   /** Convert screen (pixel) coordinates to world coordinates */

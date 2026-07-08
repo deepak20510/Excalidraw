@@ -4,7 +4,9 @@ import jwt, { JwtPayload } from "jsonwebtoken";
 import { JWT_SECRET } from "@repo/backend-common/config";
 import { PrismaClient } from "@repo/db/client";
 
-const configuredPort = Number(process.env.PORT ?? process.env.WS_PORT ?? 8082);
+const DEFAULT_PORT = 8082;
+const FALLBACK_PORT = 8083;
+const configuredPort = Number(process.env.WS_PORT ?? process.env.PORT ?? DEFAULT_PORT);
 const httpServer = createServer((req, res) => {
   if (req.url === "/health") {
     res.writeHead(200, { "Content-Type": "application/json" });
@@ -88,9 +90,24 @@ function checkUser(token: string): string | null {
   return null;
 }
 
-httpServer.listen(configuredPort, "0.0.0.0", () => {
-  console.log(`ws-backend listening on port ${configuredPort}`);
-});
+function startServer(port: number) {
+  httpServer.listen(port, "0.0.0.0", () => {
+    console.log(`ws-backend listening on port ${port}`);
+  });
+
+  httpServer.once("error", (error: NodeJS.ErrnoException) => {
+    if (error.code === "EADDRINUSE") {
+      const nextPort = port < FALLBACK_PORT ? FALLBACK_PORT : port + 1;
+      console.warn(`ws-backend port ${port} in use, trying next port ${nextPort}`);
+      startServer(nextPort);
+      return;
+    }
+
+    throw error;
+  });
+}
+
+startServer(configuredPort);
 
 wss.on("connection", async function connection(ws, request) {
   console.log("NEW WS CONNECTION");
