@@ -98,6 +98,11 @@ export class Game {
   private history: Shape[][] = [];
   private historyPointer = -1;
 
+  // Minimap state
+  private minimapCanvas: HTMLCanvasElement | null = null;
+  private minimapCtx: CanvasRenderingContext2D | null = null;
+  private isDraggingMinimap = false;
+
   socket: WebSocket;
 
   constructor(canvas: HTMLCanvasElement, roomId: string, socket: WebSocket) {
@@ -121,6 +126,11 @@ export class Game {
     window.removeEventListener("keydown", this.keyDownHandler);
     window.removeEventListener("keyup", this.keyUpHandler);
     this.socket.removeEventListener("message", this.messageListener);
+    if (this.minimapCanvas) {
+      this.minimapCanvas.removeEventListener("mousedown", this.minimapMouseDownHandler);
+      this.minimapCanvas.removeEventListener("mousemove", this.minimapMouseMoveHandler);
+    }
+    window.removeEventListener("mouseup", this.minimapMouseUpHandler);
   }
 
   private triggerSelectionCallback() {
@@ -692,7 +702,193 @@ export class Game {
     this.ctx.lineWidth = 1;
 
     this.ctx.restore();
+
+    // Draw the minimap after every canvas redraw
+    this.drawMinimap();
   }
+
+  /** Register a minimap canvas element and attach its interaction handlers */
+  public registerMinimap(canvas: HTMLCanvasElement) {
+    this.minimapCanvas = canvas;
+    this.minimapCtx = canvas.getContext("2d");
+    canvas.addEventListener("mousedown", this.minimapMouseDownHandler);
+    canvas.addEventListener("mousemove", this.minimapMouseMoveHandler);
+    window.addEventListener("mouseup", this.minimapMouseUpHandler);
+    // Draw immediately in case shapes are already loaded
+    this.drawMinimap();
+  }
+
+  /** Get the combined bounding box of all shapes in world coordinates */
+  private getAllShapesBounds(): { minX: number; minY: number; maxX: number; maxY: number } | null {
+    if (this.existingShapes.length === 0) return null;
+    let minX = Infinity, minY = Infinity, maxX = -Infinity, maxY = -Infinity;
+    for (const shape of this.existingShapes) {
+      const b = this.getShapeBounds(shape);
+      if (b.minX < minX) minX = b.minX;
+      if (b.minY < minY) minY = b.minY;
+      if (b.maxX > maxX) maxX = b.maxX;
+      if (b.maxY > maxY) maxY = b.maxY;
+    }
+    return { minX, minY, maxX, maxY };
+  }
+
+  /** Render the minimap overview */
+  private drawMinimap() {
+    if (!this.minimapCanvas || !this.minimapCtx) return;
+
+    const mw = this.minimapCanvas.width;
+    const mh = this.minimapCanvas.height;
+    const mc = this.minimapCtx;
+
+    // Clear
+    mc.clearRect(0, 0, mw, mh);
+    mc.fillStyle = "rgba(15, 15, 20, 0.88)";
+    mc.fillRect(0, 0, mw, mh);
+
+    // Viewport bounds in world space
+    const vpMinX = this.panX;
+    const vpMinY = this.panY;
+    const vpMaxX = this.panX + this.canvas.width / this.scale;
+    const vpMaxY = this.panY + this.canvas.height / this.scale;
+
+    // Combine shape bounds and viewport bounds so both fit in the minimap
+    const shapeBounds = this.getAllShapesBounds();
+    const worldMinX = Math.min(shapeBounds?.minX ?? vpMinX, vpMinX) - 40;
+    const worldMinY = Math.min(shapeBounds?.minY ?? vpMinY, vpMinY) - 40;
+    const worldMaxX = Math.max(shapeBounds?.maxX ?? vpMaxX, vpMaxX) + 40;
+    const worldMaxY = Math.max(shapeBounds?.maxY ?? vpMaxY, vpMaxY) + 40;
+
+    const worldW = worldMaxX - worldMinX;
+    const worldH = worldMaxY - worldMinY;
+    if (worldW === 0 || worldH === 0) return;
+
+    // Scale to fit in minimap while preserving aspect ratio
+    const padding = 8;
+    const availW = mw - padding * 2;
+    const availH = mh - padding * 2;
+    const scaleX = availW / worldW;
+    const scaleY = availH / worldH;
+    const ms = Math.min(scaleX, scaleY);
+
+    // Centering offsets
+    const offsetX = padding + (availW - worldW * ms) / 2;
+    const offsetY = padding + (availH - worldH * ms) / 2;
+
+    // Helper: world -> minimap pixel
+    const toMinimap = (wx: number, wy: number) => ({
+      x: offsetX + (wx - worldMinX) * ms,
+      y: offsetY + (wy - worldMinY) * ms,
+    });
+
+    // Draw shapes as filled blobs
+    mc.save();
+    for (const shape of this.existingShapes) {
+      const color = shape.style?.strokeColor ?? "#ffffff";
+      mc.strokeStyle = color;
+      mc.fillStyle = color;
+      mc.globalAlpha = 0.6;
+      mc.lineWidth = Math.max(1, (shape.style?.strokeWidth ?? 2) * ms);
+
+      if (shape.type === "rect") {
+        const tl = toMinimap(shape.x, shape.y);
+        const w = shape.width * ms;
+        const h = shape.height * ms;
+        if (shape.style?.fillColor && shape.style.fillColor !== "transparent") {
+          mc.fillStyle = shape.style.fillColor;
+          mc.fillRect(tl.x, tl.y, w, h);
+        }
+        mc.strokeRect(tl.x, tl.y, w, h);
+      } else if (shape.type === "circle") {
+        const c = toMinimap(shape.centerX, shape.centerY);
+        mc.beginPath();
+        mc.arc(c.x, c.y, Math.abs(shape.radius) * ms, 0, Math.PI * 2);
+        mc.stroke();
+      } else if (shape.type === "line" || shape.type === "arrow") {
+        const p1 = toMinimap(shape.x1, shape.y1);
+        const p2 = toMinimap(shape.x2, shape.y2);
+        mc.beginPath();
+        mc.moveTo(p1.x, p1.y);
+        mc.lineTo(p2.x, p2.y);
+        mc.stroke();
+      } else if (shape.type === "pencil" && shape.points.length > 1) {
+        mc.beginPath();
+        const first = toMinimap(shape.points[0]!.x, shape.points[0]!.y);
+        mc.moveTo(first.x, first.y);
+        for (let i = 1; i < shape.points.length; i++) {
+          const pt = toMinimap(shape.points[i]!.x, shape.points[i]!.y);
+          mc.lineTo(pt.x, pt.y);
+        }
+        mc.stroke();
+      } else if (shape.type === "text") {
+        const pos = toMinimap(shape.x, shape.y);
+        mc.fillStyle = color;
+        mc.font = `${Math.max(6, 10 * ms)}px sans-serif`;
+        mc.fillText(shape.text.substring(0, 12), pos.x, pos.y);
+      }
+    }
+    mc.restore();
+
+    // Draw viewport rectangle
+    const vptl = toMinimap(vpMinX, vpMinY);
+    const vpbr = toMinimap(vpMaxX, vpMaxY);
+    mc.save();
+    mc.strokeStyle = "rgba(99, 179, 237, 0.9)";
+    mc.lineWidth = 1.5;
+    mc.setLineDash([3, 2]);
+    mc.fillStyle = "rgba(99, 179, 237, 0.08)";
+    mc.fillRect(vptl.x, vptl.y, vpbr.x - vptl.x, vpbr.y - vptl.y);
+    mc.strokeRect(vptl.x, vptl.y, vpbr.x - vptl.x, vpbr.y - vptl.y);
+    mc.restore();
+
+    // Store mapping data for click-to-pan
+    this._minimapWorldMinX = worldMinX;
+    this._minimapWorldMinY = worldMinY;
+    this._minimapMs = ms;
+    this._minimapOffsetX = offsetX;
+    this._minimapOffsetY = offsetY;
+  }
+
+  // Stored minimap-to-world mapping (refreshed on every drawMinimap call)
+  private _minimapWorldMinX = 0;
+  private _minimapWorldMinY = 0;
+  private _minimapMs = 1;
+  private _minimapOffsetX = 0;
+  private _minimapOffsetY = 0;
+
+  /** Convert a minimap pixel position to world coordinates */
+  private minimapToWorld(mx: number, my: number) {
+    return {
+      x: (mx - this._minimapOffsetX) / this._minimapMs + this._minimapWorldMinX,
+      y: (my - this._minimapOffsetY) / this._minimapMs + this._minimapWorldMinY,
+    };
+  }
+
+  /** Pan main canvas so that a world point is at the center of the viewport */
+  private panToWorld(wx: number, wy: number) {
+    this.panX = wx - this.canvas.width / this.scale / 2;
+    this.panY = wy - this.canvas.height / this.scale / 2;
+    this.clearCanvas();
+  }
+
+  // Minimap mouse handlers
+  private minimapMouseDownHandler = (e: MouseEvent) => {
+    e.preventDefault();
+    this.isDraggingMinimap = true;
+    const rect = this.minimapCanvas!.getBoundingClientRect();
+    const world = this.minimapToWorld(e.clientX - rect.left, e.clientY - rect.top);
+    this.panToWorld(world.x, world.y);
+  };
+
+  private minimapMouseMoveHandler = (e: MouseEvent) => {
+    if (!this.isDraggingMinimap) return;
+    const rect = this.minimapCanvas!.getBoundingClientRect();
+    const world = this.minimapToWorld(e.clientX - rect.left, e.clientY - rect.top);
+    this.panToWorld(world.x, world.y);
+  };
+
+  private minimapMouseUpHandler = () => {
+    this.isDraggingMinimap = false;
+  };
 
   // --- Keyboard handlers for space-to-pan ---
 

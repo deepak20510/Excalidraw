@@ -13,6 +13,7 @@ export function Canvas({
     roomId: string;
 }) {
     const canvasRef = useRef<HTMLCanvasElement>(null);
+    const minimapRef = useRef<HTMLCanvasElement>(null);
     const [game, setGame] = useState<Game>();
     const [selectedTool, setSelectedTool] = useState<Tool>("circle");
     const [selectedShape, setSelectedShape] = useState<Shape | null>(null);
@@ -25,6 +26,11 @@ export function Canvas({
         if (canvasRef.current) {
             const g = new Game(canvasRef.current, roomId, socket);
             setGame(g);
+
+            // Register minimap canvas if already mounted
+            if (minimapRef.current) {
+                g.registerMinimap(minimapRef.current);
+            }
 
             return () => {
                 g.destroy();
@@ -48,6 +54,26 @@ export function Canvas({
     }}>
         <canvas ref={canvasRef} width={window.innerWidth} height={window.innerHeight}></canvas>
         <Topbar setSelectedTool={setSelectedTool} selectedTool={selectedTool} />
+
+        {/* Minimap */}
+        <canvas
+            ref={minimapRef}
+            width={200}
+            height={140}
+            style={{
+                position: "fixed",
+                bottom: 16,
+                right: 16,
+                width: 200,
+                height: 140,
+                borderRadius: 10,
+                border: "1px solid rgba(255,255,255,0.12)",
+                boxShadow: "0 4px 24px rgba(0,0,0,0.5)",
+                cursor: "crosshair",
+                zIndex: 40,
+                backdropFilter: "blur(8px)",
+            }}
+        />
         
         {/* Excalidraw styling panel */}
         {selectedShape && (
