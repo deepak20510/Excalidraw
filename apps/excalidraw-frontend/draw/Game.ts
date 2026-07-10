@@ -74,8 +74,9 @@ export class Game {
   private dragOffsetX = 0;
   private dragOffsetY = 0;
 
-  // Active Style state (for new shapes) and Selection callback
+  // Active Style state (for new shapes), Selection callback, and Zoom callback
   public onSelectionChange?: (selectedShape: Shape | null) => void;
+  public onZoomChange?: (scale: number) => void;
   private activeStyle: ShapeStyle = {
     strokeColor: "#ffffff",
     fillColor: "transparent",
@@ -961,6 +962,57 @@ export class Game {
 
   // --- Wheel handler for zoom ---
 
+  /** Apply a zoom factor anchored to the center of the viewport */
+  private applyZoom(newScale: number) {
+    const centerX = this.canvas.width / 2;
+    const centerY = this.canvas.height / 2;
+    const worldBefore = this.screenToWorld(centerX, centerY);
+    this.scale = Math.min(Math.max(newScale, 0.05), 20);
+    const worldAfter = this.screenToWorld(centerX, centerY);
+    this.panX -= worldAfter.x - worldBefore.x;
+    this.panY -= worldAfter.y - worldBefore.y;
+    this.clearCanvas();
+    if (this.onZoomChange) this.onZoomChange(this.scale);
+  }
+
+  public getScale(): number {
+    return this.scale;
+  }
+
+  public zoomIn() {
+    this.applyZoom(this.scale * 1.25);
+  }
+
+  public zoomOut() {
+    this.applyZoom(this.scale / 1.25);
+  }
+
+  public resetZoom() {
+    this.scale = 1;
+    this.panX = 0;
+    this.panY = 0;
+    this.clearCanvas();
+    if (this.onZoomChange) this.onZoomChange(this.scale);
+  }
+
+  public fitToScreen() {
+    const bounds = this.getAllShapesBounds();
+    if (!bounds) {
+      this.resetZoom();
+      return;
+    }
+    const padding = 60;
+    const worldW = bounds.maxX - bounds.minX + padding * 2;
+    const worldH = bounds.maxY - bounds.minY + padding * 2;
+    const scaleX = this.canvas.width / worldW;
+    const scaleY = this.canvas.height / worldH;
+    this.scale = Math.min(Math.max(Math.min(scaleX, scaleY), 0.05), 20);
+    this.panX = bounds.minX - padding;
+    this.panY = bounds.minY - padding;
+    this.clearCanvas();
+    if (this.onZoomChange) this.onZoomChange(this.scale);
+  }
+
   wheelHandler = (e: WheelEvent) => {
     e.preventDefault();
 
@@ -971,9 +1023,9 @@ export class Game {
     // World position under the cursor before zoom
     const worldBefore = this.screenToWorld(mouseX, mouseY);
 
-    // Apply zoom (clamp between 0.1x and 10x)
+    // Apply zoom (clamp between 0.05x and 20x)
     const zoomFactor = e.deltaY < 0 ? 1.1 : 1 / 1.1;
-    this.scale = Math.min(Math.max(this.scale * zoomFactor, 0.1), 10);
+    this.scale = Math.min(Math.max(this.scale * zoomFactor, 0.05), 20);
 
     // World position under the cursor after zoom (with old panX/panY)
     const worldAfter = this.screenToWorld(mouseX, mouseY);
@@ -983,6 +1035,7 @@ export class Game {
     this.panY -= worldAfter.y - worldBefore.y;
 
     this.clearCanvas();
+    if (this.onZoomChange) this.onZoomChange(this.scale);
   };
 
   // --- Mouse handlers ---

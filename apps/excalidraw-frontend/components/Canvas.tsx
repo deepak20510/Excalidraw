@@ -1,6 +1,6 @@
 import { useEffect, useRef, useState } from "react";
 import { IconButton } from "./IconButton";
-import { ArrowRight, Circle, Eraser, Minus, MousePointer2, Pencil, RectangleHorizontalIcon, Type } from "lucide-react";
+import { ArrowRight, Circle, Eraser, Maximize2, Minus, MousePointer2, Pencil, Plus, RectangleHorizontalIcon, Type } from "lucide-react";
 import { Game, Shape } from "@/draw/Game";
 
 export type Tool = "circle" | "rect" | "pencil" | "select" | "eraser" | "line" | "arrow" | "text";
@@ -17,6 +17,7 @@ export function Canvas({
     const [game, setGame] = useState<Game>();
     const [selectedTool, setSelectedTool] = useState<Tool>("circle");
     const [selectedShape, setSelectedShape] = useState<Shape | null>(null);
+    const [zoomLevel, setZoomLevel] = useState<number>(100);
 
     useEffect(() => {
         game?.setTool(selectedTool);
@@ -44,6 +45,9 @@ export function Canvas({
                 // Ensure we get a fresh reference so React triggers a re-render
                 setSelectedShape(shape ? { ...shape } : null);
             };
+            game.onZoomChange = (scale) => {
+                setZoomLevel(Math.round(scale * 100));
+            };
         }
     }, [game]);
 
@@ -54,6 +58,15 @@ export function Canvas({
     }}>
         <canvas ref={canvasRef} width={window.innerWidth} height={window.innerHeight}></canvas>
         <Topbar setSelectedTool={setSelectedTool} selectedTool={selectedTool} />
+
+        {/* Zoom Controls */}
+        <ZoomControls
+            zoomLevel={zoomLevel}
+            onZoomIn={() => game?.zoomIn()}
+            onZoomOut={() => game?.zoomOut()}
+            onResetZoom={() => game?.resetZoom()}
+            onFitToScreen={() => game?.fitToScreen()}
+        />
 
         {/* Minimap */}
         <canvas
@@ -340,4 +353,116 @@ function Topbar({selectedTool, setSelectedTool}: {
                 }} activated={selectedTool === "text"} icon={<Type />}></IconButton>
             </div>
         </div>
+}
+
+function ZoomControls({
+    zoomLevel,
+    onZoomIn,
+    onZoomOut,
+    onResetZoom,
+    onFitToScreen,
+}: {
+    zoomLevel: number;
+    onZoomIn: () => void;
+    onZoomOut: () => void;
+    onResetZoom: () => void;
+    onFitToScreen: () => void;
+}) {
+    const btnStyle = {
+        background: "none",
+        border: "none",
+        color: "rgba(255,255,255,0.85)",
+        cursor: "pointer",
+        display: "flex",
+        alignItems: "center" as const,
+        justifyContent: "center" as const,
+        width: 32,
+        height: 32,
+        borderRadius: 8,
+        fontSize: 16,
+        transition: "background 0.15s",
+        flexShrink: 0 as const,
+    };
+
+    return (
+        <div
+            style={{
+                position: "fixed",
+                bottom: 24,
+                left: 24,
+                display: "flex",
+                alignItems: "center",
+                gap: 2,
+                background: "rgba(24, 24, 27, 0.92)",
+                backdropFilter: "blur(12px)",
+                border: "1px solid rgba(255, 255, 255, 0.1)",
+                borderRadius: 12,
+                padding: "4px 6px",
+                boxShadow: "0 4px 20px rgba(0,0,0,0.5)",
+                zIndex: 50,
+            }}
+        >
+            {/* Zoom Out */}
+            <button
+                title="Zoom out"
+                onClick={onZoomOut}
+                style={btnStyle}
+                onMouseEnter={e => (e.currentTarget.style.background = "rgba(255,255,255,0.08)")}
+                onMouseLeave={e => (e.currentTarget.style.background = "none")}
+            >
+                <Minus size={14} />
+            </button>
+
+            {/* Divider */}
+            <div style={{ width: 1, height: 18, background: "rgba(255,255,255,0.12)", margin: "0 2px" }} />
+
+            {/* Zoom % — click to reset to 100% */}
+            <button
+                title="Reset to 100%"
+                onClick={onResetZoom}
+                style={{
+                    ...btnStyle,
+                    width: "auto",
+                    padding: "0 8px",
+                    fontSize: 12,
+                    fontWeight: 600,
+                    fontFamily: "monospace",
+                    letterSpacing: "0.03em",
+                    color: "rgba(255,255,255,0.9)",
+                }}
+                onMouseEnter={e => (e.currentTarget.style.background = "rgba(255,255,255,0.08)")}
+                onMouseLeave={e => (e.currentTarget.style.background = "none")}
+            >
+                {zoomLevel}%
+            </button>
+
+            {/* Divider */}
+            <div style={{ width: 1, height: 18, background: "rgba(255,255,255,0.12)", margin: "0 2px" }} />
+
+            {/* Zoom In */}
+            <button
+                title="Zoom in"
+                onClick={onZoomIn}
+                style={btnStyle}
+                onMouseEnter={e => (e.currentTarget.style.background = "rgba(255,255,255,0.08)")}
+                onMouseLeave={e => (e.currentTarget.style.background = "none")}
+            >
+                <Plus size={14} />
+            </button>
+
+            {/* Divider */}
+            <div style={{ width: 1, height: 18, background: "rgba(255,255,255,0.12)", margin: "0 2px" }} />
+
+            {/* Fit to screen */}
+            <button
+                title="Fit to screen"
+                onClick={onFitToScreen}
+                style={btnStyle}
+                onMouseEnter={e => (e.currentTarget.style.background = "rgba(255,255,255,0.08)")}
+                onMouseLeave={e => (e.currentTarget.style.background = "none")}
+            >
+                <Maximize2 size={14} />
+            </button>
+        </div>
+    );
 }
