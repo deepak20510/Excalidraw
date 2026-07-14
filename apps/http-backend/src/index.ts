@@ -10,6 +10,7 @@ import {
 } from "@repo/common/types";
 import { PrismaClient } from "@repo/db/client";
 import cors from "cors";
+import rateLimit from "express-rate-limit";
 
 const app = express();
 app.use((req, _res, next) => {
@@ -41,6 +42,37 @@ const configuredPort = Number(
 app.get("/health", (_req, res) => {
   res.status(200).json({ status: "ok" });
 });
+
+// Configure Express to trust proxy headers in production (Render, Vercel, AWS ELB, etc.)
+if (process.env.NODE_ENV === "production" || process.env.TRUST_PROXY === "true") {
+  app.set("trust proxy", 1);
+}
+
+// Global rate limiting for the whole application
+const globalLimiter = rateLimit({
+  windowMs: 15 * 60 * 1000, // 15 minutes
+  max: 100, // Limit each IP to 100 requests per 15 minutes
+  standardHeaders: true, // Return rate limit info in the `RateLimit-*` headers
+  legacyHeaders: false, // Disable the `X-RateLimit-*` headers
+  message: {
+    message: "Too many requests from this IP, please try again after 15 minutes.",
+  },
+});
+app.use(globalLimiter);
+
+// Specific rate limiting for signup endpoint as requested
+app.use(
+  "/signup",
+  rateLimit({
+    windowMs: 15 * 60 * 1000, // 15 minutes
+    max: 10, // Limit each IP to 10 signup requests per 15 minutes
+    standardHeaders: true,
+    legacyHeaders: false,
+    message: {
+      message: "Too many signup attempts, please try again after 15 minutes.",
+    },
+  }),
+);
 
 app.post("/signup", async (req, res) => {
   const parseData = CreateUserSchema.safeParse(req.body);
