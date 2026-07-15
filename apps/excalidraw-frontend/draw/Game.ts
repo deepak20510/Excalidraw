@@ -19,6 +19,7 @@ export type Shape =
       width: number;
       height: number;
       style?: ShapeStyle;
+      seed?: number;
     }
   | {
       type: "circle";
@@ -26,11 +27,13 @@ export type Shape =
       centerY: number;
       radius: number;
       style?: ShapeStyle;
+      seed?: number;
     }
   | {
       type: "pencil";
       points: { x: number; y: number }[];
       style?: ShapeStyle;
+      seed?: number;
     }
   | {
       type: "line";
@@ -39,6 +42,7 @@ export type Shape =
       x2: number;
       y2: number;
       style?: ShapeStyle;
+      seed?: number;
     }
   | {
       type: "arrow";
@@ -47,6 +51,7 @@ export type Shape =
       x2: number;
       y2: number;
       style?: ShapeStyle;
+      seed?: number;
     }
   | {
       type: "text";
@@ -54,6 +59,7 @@ export type Shape =
       y: number;
       text: string;
       style?: ShapeStyle;
+      seed?: number;
     };
 
 export class Game {
@@ -104,6 +110,15 @@ export class Game {
   private minimapCtx: CanvasRenderingContext2D | null = null;
   private isDraggingMinimap = false;
 
+  // Touch tracking state
+  private lastTouchX = 0;
+  private lastTouchY = 0;
+  private isTouching = false;
+  private isPinching = false;
+  private initialTouchDistance = 0;
+  private initialScale = 1;
+  private lastTouchCenter: { x: number; y: number } | null = null;
+
   socket: WebSocket;
 
   constructor(canvas: HTMLCanvasElement, roomId: string, socket: WebSocket) {
@@ -124,6 +139,10 @@ export class Game {
     this.canvas.removeEventListener("mouseup", this.mouseUpHandler);
     this.canvas.removeEventListener("mousemove", this.mouseMoveHandler);
     this.canvas.removeEventListener("wheel", this.wheelHandler);
+    this.canvas.removeEventListener("touchstart", this.touchStartHandler);
+    this.canvas.removeEventListener("touchmove", this.touchMoveHandler);
+    this.canvas.removeEventListener("touchend", this.touchEndHandler);
+    this.canvas.removeEventListener("touchcancel", this.touchEndHandler);
     window.removeEventListener("keydown", this.keyDownHandler);
     window.removeEventListener("keyup", this.keyUpHandler);
     this.socket.removeEventListener("message", this.messageListener);
@@ -216,6 +235,7 @@ export class Game {
             type: "pencil" as const,
             points: s.points.map((p) => ({ ...p })),
             style: s.style ? { ...s.style } : undefined,
+            seed: s.seed,
           };
         }
         return {
@@ -573,7 +593,16 @@ export class Game {
             ? [2, 4]
             : undefined;
 
+      const seedValue = shape.seed || Math.floor(Math.abs(
+        (shape.type === "rect" ? shape.x * 31 + shape.y : 
+         shape.type === "circle" ? shape.centerX * 31 + shape.centerY :
+         shape.type === "line" || shape.type === "arrow" ? shape.x1 * 31 + shape.y1 :
+         shape.type === "pencil" && shape.points.length > 0 ? shape.points[0]!.x * 31 + shape.points[0]!.y : 
+         12345) % 2000000000
+      )) || 1;
+
       const roughOptions = {
+        seed: seedValue,
         roughness:
           style.roughness === 1 ? 1.5 : style.roughness === 2 ? 2.8 : 0,
         stroke:
@@ -1167,6 +1196,7 @@ export class Game {
         height,
         width,
         style: { ...this.activeStyle },
+        seed: Math.floor(Math.random() * 2000000000),
       };
     } else if (selectedTool === "circle") {
       const radius = Math.max(Math.abs(width), Math.abs(height)) / 2;
@@ -1176,6 +1206,7 @@ export class Game {
         centerX: this.startX + (width > 0 ? radius : -radius),
         centerY: this.startY + (height > 0 ? radius : -radius),
         style: { ...this.activeStyle },
+        seed: Math.floor(Math.random() * 2000000000),
       };
     } else if (selectedTool === "pencil") {
       // Add the final point and use the accumulated points
@@ -1184,6 +1215,7 @@ export class Game {
         type: "pencil",
         points: [...this.currentPencilPoints],
         style: { ...this.activeStyle },
+        seed: Math.floor(Math.random() * 2000000000),
       };
       this.currentPencilPoints = [];
     } else if (selectedTool === "line") {
@@ -1194,6 +1226,7 @@ export class Game {
         x2: endX,
         y2: endY,
         style: { ...this.activeStyle },
+        seed: Math.floor(Math.random() * 2000000000),
       };
     } else if (selectedTool === "arrow") {
       shape = {
@@ -1203,6 +1236,7 @@ export class Game {
         x2: endX,
         y2: endY,
         style: { ...this.activeStyle },
+        seed: Math.floor(Math.random() * 2000000000),
       };
     }
 
@@ -1353,6 +1387,7 @@ export class Game {
           y: world.y,
           text,
           style: { ...this.activeStyle },
+          seed: Math.floor(Math.random() * 2000000000),
         };
         this.existingShapes.push(newShape);
         this.pushHistory();
@@ -1380,6 +1415,153 @@ export class Game {
     });
   };
 
+  // --- Touch handlers ---
+
+  touchStartHandler = (e: TouchEvent) => {
+    // If there is 1 touch, treat it as a mousedown event
+    if (e.touches.length === 1) {
+      const touch = e.touches[0]!;
+      this.isTouching = true;
+      this.isPinching = false;
+      this.lastTouchX = touch.clientX;
+      this.lastTouchY = touch.clientY;
+
+      const rect = this.canvas.getBoundingClientRect();
+      const mouseEvent = new MouseEvent("mousedown", {
+        clientX: touch.clientX,
+        clientY: touch.clientY,
+        button: 0,
+      });
+      this.mouseDownHandler(mouseEvent);
+    } else if (e.touches.length === 2) {
+      // Transition to pinch-to-zoom
+      // 1. Cancel single touch draw/drag/pan state
+      if (this.clicked || this.isDragging || this.isPanning) {
+        const mouseEvent = new MouseEvent("mouseup", {
+          clientX: this.lastTouchX,
+          clientY: this.lastTouchY,
+          button: 0,
+        });
+        this.mouseUpHandler(mouseEvent);
+      }
+      this.isTouching = false;
+      this.isPinching = true;
+
+      const t1 = e.touches[0]!;
+      const t2 = e.touches[1]!;
+
+      // Calculate initial distance and scale
+      this.initialTouchDistance = Math.hypot(t1.clientX - t2.clientX, t1.clientY - t2.clientY);
+      this.initialScale = this.scale;
+
+      // Calculate center point
+      this.lastTouchCenter = {
+        x: (t1.clientX + t2.clientX) / 2,
+        y: (t1.clientY + t2.clientY) / 2,
+      };
+    }
+  };
+
+  touchMoveHandler = (e: TouchEvent) => {
+    if (e.touches.length === 1 && this.isTouching) {
+      const touch = e.touches[0]!;
+      this.lastTouchX = touch.clientX;
+      this.lastTouchY = touch.clientY;
+
+      const mouseEvent = new MouseEvent("mousemove", {
+        clientX: touch.clientX,
+        clientY: touch.clientY,
+      });
+      this.mouseMoveHandler(mouseEvent);
+      if (e.cancelable) {
+        e.preventDefault();
+      }
+    } else if (e.touches.length === 2 && this.isPinching) {
+      const t1 = e.touches[0]!;
+      const t2 = e.touches[1]!;
+
+      // Current distance and center
+      const currentDistance = Math.hypot(t1.clientX - t2.clientX, t1.clientY - t2.clientY);
+      const currentCenter = {
+        x: (t1.clientX + t2.clientX) / 2,
+        y: (t1.clientY + t2.clientY) / 2,
+      };
+
+      if (this.initialTouchDistance > 0) {
+        const factor = currentDistance / this.initialTouchDistance;
+        const rect = this.canvas.getBoundingClientRect();
+        
+        // Center in canvas coordinates
+        const canvasCenterX = currentCenter.x - rect.left;
+        const canvasCenterY = currentCenter.y - rect.top;
+
+        // Save world coordinates before zoom
+        const worldBefore = this.screenToWorld(canvasCenterX, canvasCenterY);
+
+        // Adjust scale
+        this.scale = Math.min(Math.max(this.initialScale * factor, 0.05), 20);
+
+        // Calculate world coordinates after zoom
+        const worldAfter = this.screenToWorld(canvasCenterX, canvasCenterY);
+
+        // Shift pan to keep the center under the fingers stable
+        this.panX -= worldAfter.x - worldBefore.x;
+        this.panY -= worldAfter.y - worldBefore.y;
+      }
+
+      // Also pan the screen if fingers moved together (two-finger drag)
+      if (this.lastTouchCenter) {
+        const dx = currentCenter.x - this.lastTouchCenter.x;
+        const dy = currentCenter.y - this.lastTouchCenter.y;
+        this.panX -= dx / this.scale;
+        this.panY -= dy / this.scale;
+      }
+
+      this.lastTouchCenter = currentCenter;
+      this.clearCanvas();
+      if (this.onZoomChange) {
+        this.onZoomChange(this.scale);
+      }
+
+      if (e.cancelable) {
+        e.preventDefault();
+      }
+    }
+  };
+
+  touchEndHandler = (e: TouchEvent) => {
+    if (this.isTouching) {
+      this.isTouching = false;
+      const mouseEvent = new MouseEvent("mouseup", {
+        clientX: this.lastTouchX,
+        clientY: this.lastTouchY,
+        button: 0,
+      });
+      this.mouseUpHandler(mouseEvent);
+    }
+    
+    if (this.isPinching) {
+      // If we still have 1 finger on screen, transition back to touching
+      if (e.touches.length === 1) {
+        this.isPinching = false;
+        const touch = e.touches[0]!;
+        this.isTouching = true;
+        this.lastTouchX = touch.clientX;
+        this.lastTouchY = touch.clientY;
+
+        const mouseEvent = new MouseEvent("mousedown", {
+          clientX: touch.clientX,
+          clientY: touch.clientY,
+          button: 0,
+        });
+        this.mouseDownHandler(mouseEvent);
+      } else if (e.touches.length === 0) {
+        this.isPinching = false;
+        this.lastTouchCenter = null;
+      }
+    }
+  };
+
   initMouseHandlers() {
     this.canvas.addEventListener("mousedown", this.mouseDownHandler);
     this.canvas.addEventListener("mouseup", this.mouseUpHandler);
@@ -1388,7 +1570,20 @@ export class Game {
     this.canvas.addEventListener("wheel", this.wheelHandler, {
       passive: false,
     });
+    this.canvas.addEventListener("touchstart", this.touchStartHandler, {
+      passive: false,
+    });
+    this.canvas.addEventListener("touchmove", this.touchMoveHandler, {
+      passive: false,
+    });
+    this.canvas.addEventListener("touchend", this.touchEndHandler, {
+      passive: false,
+    });
+    this.canvas.addEventListener("touchcancel", this.touchEndHandler, {
+      passive: false,
+    });
     window.addEventListener("keydown", this.keyDownHandler);
     window.addEventListener("keyup", this.keyUpHandler);
   }
 }
+
