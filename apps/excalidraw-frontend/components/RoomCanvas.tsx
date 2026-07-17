@@ -5,9 +5,23 @@ import { useEffect, useState } from "react";
 import { Canvas } from "./Canvas";
 import { useRouter } from "next/navigation";
 
+/** Decode a JWT payload without verifying signature (client-side only) */
+function decodeJwt(token: string): Record<string, unknown> {
+  try {
+    const part = token.split(".")[1];
+    if (!part) return {};
+    const json = atob(part.replace(/-/g, "+").replace(/_/g, "/"));
+    return JSON.parse(json) as Record<string, unknown>;
+  } catch {
+    return {};
+  }
+}
+
 export function RoomCanvas({ roomId }: { roomId: string }) {
   const [socket, setSocket] = useState<WebSocket | null>(null);
   const [connectionError, setConnectionError] = useState("");
+  const [userId, setUserId] = useState("");
+  const [userName, setUserName] = useState("User");
   const router = useRouter();
 
   useEffect(() => {
@@ -22,6 +36,18 @@ export function RoomCanvas({ roomId }: { roomId: string }) {
       router.push("/signin");
       return;
     }
+
+    // Extract userId from JWT payload
+    const payload = decodeJwt(token);
+    const resolvedUserId = typeof payload.userId === "string" ? payload.userId : String(payload.userId ?? "");
+    setUserId(resolvedUserId);
+
+    // Use stored name if available, fall back to email prefix or "User"
+    const storedName = localStorage.getItem("userName") || localStorage.getItem("userEmail") || "";
+    const displayName = storedName
+      ? storedName.split("@")[0]!.replace(/[._-]/g, " ").replace(/\b\w/g, (c) => c.toUpperCase()).trim() || "User"
+      : "User";
+    setUserName(displayName);
 
     const ws = new WebSocket(`${WS_URL}?token=${token}`);
 
@@ -68,7 +94,7 @@ export function RoomCanvas({ roomId }: { roomId: string }) {
 
   return (
     <div>
-      <Canvas roomId={roomId} socket={socket} />
+      <Canvas roomId={roomId} socket={socket} userId={userId} userName={userName} />
     </div>
   );
 }

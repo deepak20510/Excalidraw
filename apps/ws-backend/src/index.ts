@@ -204,6 +204,33 @@ wss.on("connection", async function connection(ws, request) {
         });
       }
 
+      // Cursor presence: relay to other room members without any DB I/O
+      if (parsedData.type === "cursor") {
+        const senderRoomId = String(parsedData.roomId ?? "");
+        if (senderRoomId) {
+          const sender = users.find((x) => x.ws === ws);
+          users.forEach((user) => {
+            if (
+              user.ws !== ws &&
+              user.rooms.includes(senderRoomId) &&
+              user.ws.readyState === WebSocket.OPEN
+            ) {
+              user.ws.send(
+                JSON.stringify({
+                  type: "cursor",
+                  userId: sender?.userId ?? parsedData.userId,
+                  name: parsedData.name,
+                  x: parsedData.x,
+                  y: parsedData.y,
+                  roomId: senderRoomId,
+                }),
+              );
+            }
+          });
+        }
+        return;
+      }
+
       // Relay mutation messages (delete, move, undo, redo)
       // and persist the updated shape list to the database
       if (

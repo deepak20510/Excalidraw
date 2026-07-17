@@ -62,6 +62,29 @@ export type Shape =
       seed?: number;
     };
 
+// Palette of visually distinct colors for remote cursors
+const CURSOR_COLORS = [
+  "#6366f1", // indigo
+  "#ec4899", // pink
+  "#f59e0b", // amber
+  "#10b981", // emerald
+  "#3b82f6", // blue
+  "#ef4444", // red
+  "#8b5cf6", // violet
+  "#14b8a6", // teal
+  "#f97316", // orange
+  "#84cc16", // lime
+];
+
+export interface RemoteCursor {
+  userId: string;
+  name: string;
+  x: number; // screen-space X
+  y: number; // screen-space Y
+  color: string;
+  lastSeen: number; // Date.now()
+}
+
 export class Game {
   private canvas: HTMLCanvasElement;
   private ctx: CanvasRenderingContext2D;
@@ -119,17 +142,30 @@ export class Game {
   private initialScale = 1;
   private lastTouchCenter: { x: number; y: number } | null = null;
 
-  socket: WebSocket;
+  // Live cursor presence
+  private remoteCursors: Map<string, RemoteCursor> = new Map();
+  private cursorColorMap: Map<string, string> = new Map();
+  private cursorColorIndex = 0;
+  private lastCursorBroadcast = 0;
+  private readonly CURSOR_THROTTLE_MS = 33; // ~30 fps
+  private readonly CURSOR_EXPIRY_MS = 5000; // remove after 5s of inactivity
+  private userId: string;
+  private userName: string;
 
-  constructor(canvas: HTMLCanvasElement, roomId: string, socket: WebSocket) {
+  socket: WebSocket;
+  public initPromise: Promise<void>;
+
+  constructor(canvas: HTMLCanvasElement, roomId: string, socket: WebSocket, userId = "", userName = "User") {
     this.canvas = canvas;
     this.ctx = canvas.getContext("2d")!;
     this.roughCanvas = rough.canvas(canvas);
     this.existingShapes = [];
     this.roomId = roomId;
     this.socket = socket;
+    this.userId = userId;
+    this.userName = userName;
     this.clicked = false;
-    this.init();
+    this.initPromise = this.init();
     this.initHandlers();
     this.initMouseHandlers();
   }
@@ -151,6 +187,7 @@ export class Game {
       this.minimapCanvas.removeEventListener("mousemove", this.minimapMouseMoveHandler);
     }
     window.removeEventListener("mouseup", this.minimapMouseUpHandler);
+    this.remoteCursors.clear();
   }
 
   private triggerSelectionCallback() {
@@ -267,6 +304,16 @@ export class Game {
     }
   }
 
+  /** Assign a stable color to a remote user's cursor */
+  private getCursorColor(userId: string): string {
+    if (!this.cursorColorMap.has(userId)) {
+      const color = CURSOR_COLORS[this.cursorColorIndex % CURSOR_COLORS.length]!;
+      this.cursorColorMap.set(userId, color);
+      this.cursorColorIndex++;
+    }
+    return this.cursorColorMap.get(userId)!;
+  }
+
   private messageListener = (event: MessageEvent<any>) => {
     if (typeof event.data !== "string") {
       return;
@@ -274,6 +321,30 @@ export class Game {
 
     try {
       const message = JSON.parse(event.data);
+      if (message.type === "cursor") {
+        // Handle remote cursor presence update
+        const uid = message.userId as string;
+        if (!uid) return;
+        const color = this.getCursorColor(uid);
+        this.remoteCursors.set(uid, {
+          userId: uid,
+          name: (message.name as string) || "User",
+          x: message.x as number,
+          y: message.y as number,
+          color,
+          lastSeen: Date.now(),
+        });
+        // Prune stale cursors
+        const now = Date.now();
+        this.remoteCursors.forEach((cursor, key) => {
+          if (now - cursor.lastSeen > this.CURSOR_EXPIRY_MS) {
+            this.remoteCursors.delete(key);
+          }
+        });
+        // Redraw so the cursor appears immediately
+        this.clearCanvas();
+        return;
+      }
       if (message.type === "chat") {
         const parsedShape = JSON.parse(message.message);
         if (parsedShape.shape) {
@@ -529,6 +600,90 @@ export class Game {
     this.ctx.stroke();
   }
 
+  /** Draw all remote cursors in screen space (called after world-space shapes are drawn) */
+  private drawRemoteCursors() {
+    const ctx = this.ctx;
+    // Reset to screen space
+    ctx.save();
+    ctx.setTransform(1, 0, 0, 1, 0, 0);
+
+    const now = Date.now();
+    this.remoteCursors.forEach((cursor) => {
+      if (now - cursor.lastSeen > this.CURSOR_EXPIRY_MS) return;
+
+      const { x, y, name, color } = cursor;
+
+      // Fade out in the last second of expiry
+      const age = now - cursor.lastSeen;
+      const fadeStart = this.CURSOR_EXPIRY_MS - 1000;
+      const alpha = age > fadeStart
+        ? 1 - (age - fadeStart) / 1000
+        : 1;
+
+      ctx.globalAlpha = Math.max(0, alpha);
+
+      // --- Cursor arrow ---
+      ctx.save();
+      ctx.translate(x, y);
+      ctx.beginPath();
+      // Simple arrow cursor shape
+      ctx.moveTo(0, 0);
+      ctx.lineTo(0, 20);
+      ctx.lineTo(4.5, 15.5);
+      ctx.lineTo(9, 24);
+      ctx.lineTo(11, 23);
+      ctx.lineTo(6.5, 14.5);
+      ctx.lineTo(12, 14.5);
+      ctx.closePath();
+      ctx.fillStyle = color;
+      ctx.fill();
+      ctx.strokeStyle = "rgba(0,0,0,0.5)";
+      ctx.lineWidth = 1;
+      ctx.stroke();
+      ctx.restore();
+
+      // --- Name label ---
+      const labelX = x + 14;
+      const labelY = y + 6;
+      const labelText = name.length > 16 ? name.slice(0, 14) + "…" : name;
+      ctx.font = "bold 12px -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif";
+      const textWidth = ctx.measureText(labelText).width;
+      const paddingH = 7;
+      const boxW = textWidth + paddingH * 2;
+      const boxH = 20;
+
+      // Rounded rect background
+      ctx.save();
+      ctx.fillStyle = color;
+      const rx = 4;
+      ctx.beginPath();
+      ctx.moveTo(labelX + rx, labelY);
+      ctx.lineTo(labelX + boxW - rx, labelY);
+      ctx.arcTo(labelX + boxW, labelY, labelX + boxW, labelY + rx, rx);
+      ctx.lineTo(labelX + boxW, labelY + boxH - rx);
+      ctx.arcTo(labelX + boxW, labelY + boxH, labelX + boxW - rx, labelY + boxH, rx);
+      ctx.lineTo(labelX + rx, labelY + boxH);
+      ctx.arcTo(labelX, labelY + boxH, labelX, labelY + boxH - rx, rx);
+      ctx.lineTo(labelX, labelY + rx);
+      ctx.arcTo(labelX, labelY, labelX + rx, labelY, rx);
+      ctx.closePath();
+      ctx.fill();
+      ctx.restore();
+
+      // Label text
+      ctx.save();
+      ctx.fillStyle = "#ffffff";
+      ctx.font = "bold 12px -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif";
+      ctx.textBaseline = "middle";
+      ctx.fillText(labelText, labelX + paddingH, labelY + boxH / 2);
+      ctx.restore();
+
+      ctx.globalAlpha = 1;
+    });
+
+    ctx.restore();
+  }
+
   clearCanvas() {
     // Reset transform to identity so clearRect covers the whole physical canvas
     this.ctx.setTransform(1, 0, 0, 1, 0, 0);
@@ -735,6 +890,9 @@ export class Game {
 
     // Draw the minimap after every canvas redraw
     this.drawMinimap();
+
+    // Draw remote cursors in screen space (always on top)
+    this.drawRemoteCursors();
   }
 
   /** Register a minimap canvas element and attach its interaction handlers */
@@ -1258,7 +1416,32 @@ export class Game {
     this.clearCanvas();
   };
 
+  /** Broadcast the local cursor position (throttled to ~30fps) */
+  private broadcastCursor(screenX: number, screenY: number) {
+    const now = Date.now();
+    if (now - this.lastCursorBroadcast < this.CURSOR_THROTTLE_MS) return;
+    if (this.socket.readyState !== WebSocket.OPEN) return;
+    this.lastCursorBroadcast = now;
+    this.socket.send(
+      JSON.stringify({
+        type: "cursor",
+        userId: this.userId,
+        name: this.userName,
+        x: screenX,
+        y: screenY,
+        roomId: this.roomId,
+      }),
+    );
+  }
+
   mouseMoveHandler = (e: MouseEvent) => {
+    const rect = this.canvas.getBoundingClientRect();
+    const screenX = e.clientX - rect.left;
+    const screenY = e.clientY - rect.top;
+
+    // Broadcast cursor position (throttled)
+    this.broadcastCursor(screenX, screenY);
+
     // Handle panning
     if (this.isPanning) {
       const dx = e.clientX - this.lastPanX;
@@ -1274,9 +1457,6 @@ export class Game {
     // Handle dragging a selected shape (checked before `clicked` because
     // the select-tool mousedown sets isDragging but NOT clicked)
     if (this.isDragging && this.selectedShapeIndex !== null) {
-      const rect = this.canvas.getBoundingClientRect();
-      const screenX = e.clientX - rect.left;
-      const screenY = e.clientY - rect.top;
       const world = this.screenToWorld(screenX, screenY);
       const shape = this.existingShapes[this.selectedShapeIndex]!;
       const bounds = this.getShapeBounds(shape);
@@ -1291,9 +1471,6 @@ export class Game {
 
     if (!this.clicked) return;
 
-    const rect = this.canvas.getBoundingClientRect();
-    const screenX = e.clientX - rect.left;
-    const screenY = e.clientY - rect.top;
     const world = this.screenToWorld(screenX, screenY);
     const currentX = world.x;
     const currentY = world.y;

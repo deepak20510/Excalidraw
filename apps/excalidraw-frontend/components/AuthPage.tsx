@@ -32,6 +32,7 @@ export function AuthPage({ isSignin }: { isSignin: boolean }) {
           password,
         });
         localStorage.setItem("token", res.data.token);
+        localStorage.setItem("userEmail", username);
         router.push("/");
       } else {
         await axios.post(`${HTTP_BACKEND}/signup`, {
@@ -39,6 +40,8 @@ export function AuthPage({ isSignin }: { isSignin: boolean }) {
           password,
           name,
         });
+        localStorage.setItem("userEmail", username);
+        if (name) localStorage.setItem("userName", name);
         router.push("/signin");
       }
     } catch (err: unknown) {

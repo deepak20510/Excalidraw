@@ -5,12 +5,30 @@ import { Game, Shape } from "@/draw/Game";
 
 export type Tool = "circle" | "rect" | "pencil" | "select" | "eraser" | "line" | "arrow" | "text";
 
+/** Decode a JWT payload without signature verification (client-side only) */
+function decodeJwtPayload(token: string): { userId?: string } {
+    try {
+        const payloadBase64 = token.split(".")[1];
+        if (!payloadBase64) return {};
+        const json = atob(payloadBase64.replace(/-/g, "+").replace(/_/g, "/"));
+        return JSON.parse(json);
+    } catch {
+        return {};
+    }
+}
+
 export function Canvas({
     roomId,
-    socket
+    socket,
+    onReady,
+    userId,
+    userName,
 }: {
     socket: WebSocket;
     roomId: string;
+    onReady?: () => void;
+    userId?: string;
+    userName?: string;
 }) {
     const canvasRef = useRef<HTMLCanvasElement>(null);
     const minimapRef = useRef<HTMLCanvasElement>(null);
@@ -25,7 +43,7 @@ export function Canvas({
 
     useEffect(() => {
         if (canvasRef.current) {
-            const g = new Game(canvasRef.current, roomId, socket);
+            const g = new Game(canvasRef.current, roomId, socket, userId ?? "", userName ?? "User");
             setGame(g);
 
             // Register minimap canvas if already mounted
@@ -33,11 +51,16 @@ export function Canvas({
                 g.registerMinimap(minimapRef.current);
             }
 
+            // Call onReady when the game's shapes initialization is complete
+            g.initPromise.then(() => {
+                onReady?.();
+            });
+
             return () => {
                 g.destroy();
             }
         }
-    }, [canvasRef]);
+    }, [canvasRef, onReady]);
 
     useEffect(() => {
         if (game) {
