@@ -223,6 +223,7 @@ export default function LandingPage() {
                 placeholder="Enter Room Name / Slug..."
                 value={roomSlug}
                 onChange={(e) => setRoomSlug(e.target.value)}
+                onKeyDown={(e) => e.key === "Enter" && handleJoinOrCreateRoom()}
                 className="w-full px-5 py-3.5 bg-slate-950/80 border border-white/[0.06] focus:border-indigo-500/50 rounded-xl text-sm placeholder-slate-500 text-slate-200 outline-none transition-all focus:ring-2 focus:ring-indigo-500/10 tracking-wide"
               />
               <button

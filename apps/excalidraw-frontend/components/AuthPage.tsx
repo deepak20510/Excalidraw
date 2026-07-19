@@ -98,6 +98,7 @@ export function AuthPage({ isSignin }: { isSignin: boolean }) {
                 placeholder="Full Name"
                 value={name}
                 onChange={(e) => setName(e.target.value)}
+                onKeyDown={(e) => e.key === "Enter" && handleSubmit()}
                 className="w-full pl-10 pr-4 py-3 bg-slate-950/80 border border-white/[0.06] focus:border-indigo-500/50 rounded-xl text-sm placeholder-slate-500 text-slate-200 outline-none transition-all focus:ring-2 focus:ring-indigo-500/10 tracking-wide"
               />
             </div>
@@ -112,6 +113,7 @@ export function AuthPage({ isSignin }: { isSignin: boolean }) {
               placeholder="Email"
               value={username}
               onChange={(e) => setUsername(e.target.value)}
+              onKeyDown={(e) => e.key === "Enter" && handleSubmit()}
               className="w-full pl-10 pr-4 py-3 bg-slate-950/80 border border-white/[0.06] focus:border-indigo-500/50 rounded-xl text-sm placeholder-slate-500 text-slate-200 outline-none transition-all focus:ring-2 focus:ring-indigo-500/10 tracking-wide"
             />
           </div>
@@ -125,6 +127,7 @@ export function AuthPage({ isSignin }: { isSignin: boolean }) {
               type="password"
               value={password}
               onChange={(e) => setPassword(e.target.value)}
+              onKeyDown={(e) => e.key === "Enter" && handleSubmit()}
               className="w-full pl-10 pr-4 py-3 bg-slate-950/80 border border-white/[0.06] focus:border-indigo-500/50 rounded-xl text-sm placeholder-slate-500 text-slate-200 outline-none transition-all focus:ring-2 focus:ring-indigo-500/10 tracking-wide"
             />
           </div>
