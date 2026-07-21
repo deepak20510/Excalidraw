@@ -15,7 +15,7 @@ model User{
   name       String
   photo      String?
   rooms      Room[]
-  chats      Chat[]
+  shapes     Shape[]
 }
 model Room{
   id         Int         @id @default(autoincrement())
@@ -23,13 +23,21 @@ model Room{
   createdAt  DateTime    @default(now())
   adminId    String
   admin      User        @relation(fields: [adminId],references: [id])
-  chats      Chat[]
+  shapes     Shape[]
 }
-model Chat{
-  id        Int     @id @default(autoincrement())
+model Shape {
+  id        Int      @id @default(autoincrement())
   roomId    Int
-  message   String
   userId    String
-  room      Room    @relation(fields: [roomId],references: [id])
-  user      User    @relation(fields: [userId],references: [id])
+  type      String   // "rect" | "circle" | "pencil" | "line" | "text" | "arrow"
+  data      Json     // typed shape payload
+  style     Json     // ShapeStyle object
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+  room      Room     @relation(fields: [roomId], references: [id], onDelete: Cascade)
+  user      User     @relation(fields: [userId], references: [id])
+
+  @@index([roomId])
 }
+
+

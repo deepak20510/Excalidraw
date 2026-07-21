@@ -49,35 +49,75 @@ export function RoomCanvas({ roomId }: { roomId: string }) {
       : "User";
     setUserName(displayName);
 
-    const ws = new WebSocket(`${WS_URL}?token=${token}`);
+    let activeSocket: WebSocket | null = null;
+    let reconnectTimeoutId: NodeJS.Timeout | null = null;
+    let reconnectDelay = 1000;
+    const maxReconnectDelay = 16000;
+    let isCleanedUp = false;
 
-    ws.onopen = () => {
-      setConnectionError("");
-      setSocket(ws);
-      ws.send(JSON.stringify({ type: "join_room", roomId: roomId }));
-    };
+    function connect() {
+      if (isCleanedUp) return;
 
-    ws.onmessage = (event) => {
-      try {
-        const data = JSON.parse(event.data);
-        if (data.type === "error" && typeof data.message === "string") {
-          setConnectionError(data.message);
+      const ws = new WebSocket(`${WS_URL}?token=${token}`);
+      activeSocket = ws;
+
+      ws.onopen = () => {
+        if (isCleanedUp) {
+          ws.close();
+          return;
         }
-      } catch (error) {
-        console.error("Failed to parse websocket message:", error);
-      }
-    };
+        setConnectionError("");
+        setSocket(ws);
+        reconnectDelay = 1000;
+        ws.send(JSON.stringify({ type: "join_room", roomId: roomId }));
+      };
 
-    ws.onerror = () => {
-      setConnectionError("WebSocket connection failed.");
-    };
+      ws.onmessage = (event) => {
+        if (isCleanedUp) return;
+        try {
+          const data = JSON.parse(event.data);
+          if (data.type === "error" && typeof data.message === "string") {
+            setConnectionError(data.message);
+          }
+        } catch (error) {
+          console.error("Failed to parse websocket message:", error);
+        }
+      };
 
-    ws.onclose = () => {
-      setSocket(null);
-    };
+      ws.onerror = () => {
+        if (isCleanedUp) return;
+        setConnectionError("WebSocket connection failed.");
+      };
+
+      ws.onclose = (event) => {
+        if (isCleanedUp) return;
+        setSocket(null);
+
+        if (event.code === 1008) {
+          setConnectionError("Unauthorized connection. Please log in again.");
+          router.push("/signin");
+          return;
+        }
+
+        console.log(`WebSocket closed. Reconnecting in ${reconnectDelay}ms...`);
+        reconnectTimeoutId = setTimeout(() => {
+          connect();
+        }, reconnectDelay);
+
+        reconnectDelay = Math.min(reconnectDelay * 2, maxReconnectDelay);
+      };
+    }
+
+    connect();
 
     return () => {
-      ws.close();
+      isCleanedUp = true;
+      if (reconnectTimeoutId) {
+        clearTimeout(reconnectTimeoutId);
+      }
+      if (activeSocket) {
+        activeSocket.close();
+      }
     };
   }, [roomId, router]);
 

@@ -19,6 +19,22 @@ const httpServer = createServer((req, res) => {
 });
 const wss = new WebSocketServer({ server: httpServer });
 
+// Keepalive heartbeat checks for idle connections
+const heartbeatInterval = setInterval(() => {
+  wss.clients.forEach((ws) => {
+    if ((ws as any).isAlive === false) {
+      console.log("Terminating unresponsive WS connection");
+      return ws.terminate();
+    }
+    (ws as any).isAlive = false;
+    ws.ping();
+  });
+}, 30000);
+
+wss.on("close", () => {
+  clearInterval(heartbeatInterval);
+});
+
 interface User {
   ws: WebSocket;
   rooms: string[];
@@ -126,6 +142,11 @@ wss.on("connection", async function connection(ws, request) {
     ws.close(1008, "Unauthorized: invalid or missing token.");
     return;
   }
+
+  (ws as any).isAlive = true;
+  ws.on("pong", () => {
+    (ws as any).isAlive = true;
+  });
   users.push({
     userId,
     rooms: [],
@@ -178,11 +199,28 @@ wss.on("connection", async function connection(ws, request) {
           return;
         }
 
-        await PrismaClient.chat.create({
+        let parsedShape: any;
+        try {
+          parsedShape = JSON.parse(message).shape;
+        } catch (err) {
+          console.error("Failed to parse shape message:", err);
+          sendWsError(ws, "Invalid shape payload");
+          return;
+        }
+
+        const { type, style, ...data } = parsedShape || {};
+        if (!type) {
+          sendWsError(ws, "Invalid shape type");
+          return;
+        }
+
+        await PrismaClient.shape.create({
           data: {
             roomId,
-            message,
             userId,
+            type,
+            data: data || {},
+            style: style || {},
           },
         });
         users.forEach((user) => {
@@ -248,15 +286,20 @@ wss.on("connection", async function connection(ws, request) {
         if (Array.isArray(parsedData.shapes)) {
           try {
             await PrismaClient.$transaction([
-              PrismaClient.chat.deleteMany({
+              PrismaClient.shape.deleteMany({
                 where: { roomId },
               }),
-              PrismaClient.chat.createMany({
-                data: parsedData.shapes.map((shape: any) => ({
-                  roomId,
-                  message: JSON.stringify({ shape }),
-                  userId,
-                })),
+              PrismaClient.shape.createMany({
+                data: parsedData.shapes.map((shape: any) => {
+                  const { type, style, ...data } = shape || {};
+                  return {
+                    roomId,
+                    userId,
+                    type: type || "unknown",
+                    data: data || {},
+                    style: style || {},
+                  };
+                }),
               }),
             ]);
           } catch (err) {

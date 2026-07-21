@@ -1081,6 +1081,11 @@ export class Game {
   // --- Keyboard handlers for space-to-pan ---
 
   keyDownHandler = (e: KeyboardEvent) => {
+    const activeEl = document.activeElement;
+    if (activeEl && (activeEl.tagName === "INPUT" || activeEl.tagName === "TEXTAREA")) {
+      return;
+    }
+
     if (e.code === "Space" && !this.spacePressed) {
       this.spacePressed = true;
       this.canvas.style.cursor = "grab";
@@ -1139,6 +1144,11 @@ export class Game {
   };
 
   keyUpHandler = (e: KeyboardEvent) => {
+    const activeEl = document.activeElement;
+    if (activeEl && (activeEl.tagName === "INPUT" || activeEl.tagName === "TEXTAREA")) {
+      return;
+    }
+
     if (e.code === "Space") {
       this.spacePressed = false;
       if (!this.isPanning) {
@@ -1533,31 +1543,71 @@ export class Game {
     const screenY = clientY - rect.top;
     const world = this.screenToWorld(screenX, screenY);
 
+    const fontSize = Math.round(20 * this.scale);
+    const strokeColor = this.activeStyle.strokeColor || "#ffffff";
+
+    // Invisible sizing ruler to measure text width dynamically
+    const ruler = document.createElement("span");
+    ruler.style.cssText = `
+      position: fixed;
+      visibility: hidden;
+      white-space: pre;
+      font: ${fontSize}px 'Inter', -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif;
+      letter-spacing: 0.01em;
+      pointer-events: none;
+    `;
+    document.body.appendChild(ruler);
+
     const input = document.createElement("input");
     input.type = "text";
-    input.style.position = "fixed";
-    input.style.left = `${clientX}px`;
-    input.style.top = `${clientY - 10}px`;
-    input.style.font = `${20 * this.scale}px sans-serif`;
-    input.style.background = "rgba(0, 0, 0, 0.8)";
-    input.style.color = "white";
-    input.style.border = "1px solid rgba(59, 130, 246, 0.8)";
-    input.style.outline = "none";
-    input.style.padding = "2px 4px";
-    input.style.zIndex = "1000";
+    input.autocomplete = "off";
+    input.spellcheck = false;
+
+    const minWidth = Math.max(4, fontSize);
+
+    Object.assign(input.style, {
+      position: "fixed",
+      left: `${clientX}px`,
+      top: `${clientY - fontSize * 0.85}px`,
+      minWidth: `${minWidth}px`,
+      width: `${minWidth}px`,
+      font: `${fontSize}px 'Inter', -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif`,
+      letterSpacing: "0.01em",
+      lineHeight: "1.2",
+      color: strokeColor,
+      background: "transparent",
+      border: "none",
+      borderBottom: `2px solid ${strokeColor}`,
+      outline: "none",
+      padding: "0",
+      margin: "0",
+      boxSizing: "border-box" as any,
+      caretColor: strokeColor,
+      zIndex: "9999",
+      overflow: "hidden",
+      whiteSpace: "pre",
+    });
+
+    // Auto-resize width as user types
+    const resize = () => {
+      ruler.textContent = input.value || " ";
+      const w = ruler.getBoundingClientRect().width;
+      input.style.width = `${Math.max(minWidth, Math.ceil(w) + 2)}px`;
+    };
+    input.addEventListener("input", resize);
 
     document.body.appendChild(input);
-    // Slight timeout to ensure keyboard focus
-    setTimeout(() => input.focus(), 0);
+    setTimeout(() => { input.focus(); resize(); }, 0);
 
     let finished = false;
     const finish = () => {
       if (finished) return;
       finished = true;
-      const text = input.value.trim();
+      const text = input.value;
       document.body.removeChild(input);
+      document.body.removeChild(ruler);
 
-      if (text) {
+      if (text.trim()) {
         const newShape: Shape = {
           type: "text",
           x: world.x,
@@ -1583,11 +1633,14 @@ export class Game {
 
     input.addEventListener("blur", finish);
     input.addEventListener("keydown", (event) => {
+      // Allow space, backspace and all normal typing to pass through
+      event.stopPropagation();
       if (event.key === "Enter") {
         finish();
       } else if (event.key === "Escape") {
         finished = true;
         document.body.removeChild(input);
+        document.body.removeChild(ruler);
       }
     });
   };

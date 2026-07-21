@@ -140,6 +140,9 @@ app.post("/signin", async (req, res) => {
         userId: user.id,
       },
       JWT_SECRET,
+      {
+        expiresIn: "7d",
+      },
     );
 
     res.json({ token });
@@ -232,17 +235,34 @@ app.get("/chats/:roomId", async (req, res) => {
     return;
   }
 
-  const messages = await PrismaClient.chat.findMany({
-    where: {
-      roomId: roomId,
-    },
-    orderBy: {
-      id: "asc",
-    },
-  });
-  res.json({
-    messages,
-  });
+  try {
+    const shapes = await PrismaClient.shape.findMany({
+      where: {
+        roomId: roomId,
+      },
+      orderBy: {
+        id: "asc",
+      },
+    });
+
+    const messages = shapes.map((shape) => ({
+      message: JSON.stringify({
+        shape: {
+          type: shape.type,
+          style: shape.style,
+          ...(shape.data as any),
+        },
+      }),
+    }));
+
+    res.json({
+      messages,
+    });
+  } catch (err) {
+    res.status(500).json({
+      message: "Internal server error",
+    });
+  }
 });
 
 startServer(configuredPort);
