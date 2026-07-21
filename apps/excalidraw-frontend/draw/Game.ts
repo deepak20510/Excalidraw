@@ -1792,6 +1792,218 @@ export class Game {
     }
   };
 
+  /**
+   * Export the current canvas content as a PNG file download.
+   * Renders all shapes to an offscreen canvas sized to the content bounding box
+   * (with padding), with no selection highlights, remote cursors, or minimap.
+   */
+  public exportAsPNG(filename = "canvas.png") {
+    const PADDING = 40;
+    const MIN_SIZE = 200;
+
+    // Compute bounding box of all shapes (world coordinates)
+    const bounds = this.getAllShapesBounds();
+
+    // Determine offscreen canvas dimensions
+    let worldMinX: number, worldMinY: number, worldWidth: number, worldHeight: number;
+    if (bounds) {
+      worldMinX = bounds.minX - PADDING;
+      worldMinY = bounds.minY - PADDING;
+      worldWidth = Math.max(bounds.maxX - bounds.minX + PADDING * 2, MIN_SIZE);
+      worldHeight = Math.max(bounds.maxY - bounds.minY + PADDING * 2, MIN_SIZE);
+    } else {
+      // Empty canvas — export a blank canvas showing the current viewport
+      worldMinX = this.panX;
+      worldMinY = this.panY;
+      worldWidth = this.canvas.width / this.scale;
+      worldHeight = this.canvas.height / this.scale;
+    }
+
+    // Create an offscreen canvas at 2× resolution for crisp exports
+    const pixelRatio = 2;
+    const offscreen = document.createElement("canvas");
+    offscreen.width = Math.ceil(worldWidth * pixelRatio);
+    offscreen.height = Math.ceil(worldHeight * pixelRatio);
+
+    const offCtx = offscreen.getContext("2d")!;
+
+    // Black background (matches the live canvas)
+    offCtx.fillStyle = "#000000";
+    offCtx.fillRect(0, 0, offscreen.width, offscreen.height);
+
+    // Apply scale to map world coords → offscreen pixels
+    offCtx.setTransform(pixelRatio, 0, 0, pixelRatio, -worldMinX * pixelRatio, -worldMinY * pixelRatio);
+
+    // Build a temporary RoughJS canvas backed by the offscreen canvas
+    const rc = rough.canvas(offscreen);
+
+    // Draw every shape (clean — no selection, no cursors)
+    this.existingShapes.forEach((shape) => {
+      const style = shape.style || {
+        strokeColor: "#ffffff",
+        fillColor: "transparent",
+        strokeWidth: 2,
+        opacity: 1,
+        strokeStyle: "solid",
+        roughness: 0,
+      };
+
+      offCtx.save();
+      offCtx.globalAlpha = style.opacity;
+
+      // Line dash
+      if (style.strokeStyle === "dashed") {
+        offCtx.setLineDash([10, 5]);
+      } else if (style.strokeStyle === "dotted") {
+        offCtx.setLineDash([2, 4]);
+      } else {
+        offCtx.setLineDash([]);
+      }
+
+      offCtx.strokeStyle = style.strokeColor;
+      offCtx.fillStyle = style.fillColor;
+      offCtx.lineWidth = style.strokeWidth;
+
+      const strokeLineDash =
+        style.strokeStyle === "dashed"
+          ? [10, 5]
+          : style.strokeStyle === "dotted"
+            ? [2, 4]
+            : undefined;
+
+      const seedValue =
+        shape.seed ||
+        Math.floor(
+          Math.abs(
+            (shape.type === "rect"
+              ? shape.x * 31 + shape.y
+              : shape.type === "circle"
+                ? shape.centerX * 31 + shape.centerY
+                : shape.type === "line" || shape.type === "arrow"
+                  ? shape.x1 * 31 + shape.y1
+                  : shape.type === "pencil" && shape.points.length > 0
+                    ? shape.points[0]!.x * 31 + shape.points[0]!.y
+                    : 12345) % 2000000000,
+          ),
+        ) || 1;
+
+      const roughOptions = {
+        seed: seedValue,
+        roughness: style.roughness === 1 ? 1.5 : style.roughness === 2 ? 2.8 : 0,
+        stroke: style.strokeColor,
+        strokeWidth: style.strokeWidth,
+        fill: style.fillColor === "transparent" ? undefined : style.fillColor,
+        fillStyle: "solid" as const,
+        strokeLineDash,
+      };
+
+      if (shape.type === "rect") {
+        if (style.roughness > 0) {
+          rc.rectangle(shape.x, shape.y, shape.width, shape.height, roughOptions);
+        } else {
+          if (style.fillColor !== "transparent") {
+            offCtx.fillRect(shape.x, shape.y, shape.width, shape.height);
+          }
+          offCtx.strokeRect(shape.x, shape.y, shape.width, shape.height);
+        }
+      } else if (shape.type === "circle") {
+        if (style.roughness > 0) {
+          rc.circle(shape.centerX, shape.centerY, Math.abs(shape.radius) * 2, roughOptions);
+        } else {
+          if (style.fillColor !== "transparent") {
+            offCtx.beginPath();
+            offCtx.arc(shape.centerX, shape.centerY, Math.abs(shape.radius), 0, Math.PI * 2);
+            offCtx.fill();
+            offCtx.closePath();
+          }
+          offCtx.beginPath();
+          offCtx.arc(shape.centerX, shape.centerY, Math.abs(shape.radius), 0, Math.PI * 2);
+          offCtx.stroke();
+          offCtx.closePath();
+        }
+      } else if (shape.type === "pencil") {
+        if (style.roughness > 0 && shape.points.length >= 2) {
+          const pts = shape.points.map((p) => [p.x, p.y] as [number, number]);
+          rc.curve(pts, roughOptions);
+        } else {
+          // Inline smooth pencil draw on offCtx
+          const points = shape.points;
+          if (points.length >= 2) {
+            offCtx.beginPath();
+            offCtx.moveTo(points[0]!.x, points[0]!.y);
+            if (points.length === 2) {
+              offCtx.lineTo(points[1]!.x, points[1]!.y);
+            } else {
+              for (let i = 1; i < points.length - 1; i++) {
+                const midX = (points[i]!.x + points[i + 1]!.x) / 2;
+                const midY = (points[i]!.y + points[i + 1]!.y) / 2;
+                offCtx.quadraticCurveTo(points[i]!.x, points[i]!.y, midX, midY);
+              }
+              const last = points[points.length - 1]!;
+              const secondLast = points[points.length - 2]!;
+              offCtx.quadraticCurveTo(secondLast.x, secondLast.y, last.x, last.y);
+            }
+            offCtx.stroke();
+          }
+        }
+      } else if (shape.type === "line") {
+        if (style.roughness > 0) {
+          rc.line(shape.x1, shape.y1, shape.x2, shape.y2, roughOptions);
+        } else {
+          offCtx.beginPath();
+          offCtx.moveTo(shape.x1, shape.y1);
+          offCtx.lineTo(shape.x2, shape.y2);
+          offCtx.stroke();
+        }
+      } else if (shape.type === "arrow") {
+        if (style.roughness > 0) {
+          const headLength = 12;
+          const angle = Math.atan2(shape.y2 - shape.y1, shape.x2 - shape.x1);
+          const wing1X = shape.x2 - headLength * Math.cos(angle - Math.PI / 6);
+          const wing1Y = shape.y2 - headLength * Math.sin(angle - Math.PI / 6);
+          const wing2X = shape.x2 - headLength * Math.cos(angle + Math.PI / 6);
+          const wing2Y = shape.y2 - headLength * Math.sin(angle + Math.PI / 6);
+          rc.line(shape.x1, shape.y1, shape.x2, shape.y2, roughOptions);
+          rc.line(shape.x2, shape.y2, wing1X, wing1Y, roughOptions);
+          rc.line(shape.x2, shape.y2, wing2X, wing2Y, roughOptions);
+        } else {
+          offCtx.beginPath();
+          offCtx.moveTo(shape.x1, shape.y1);
+          offCtx.lineTo(shape.x2, shape.y2);
+          offCtx.stroke();
+          // Arrowhead
+          const headLength = 12;
+          const angle = Math.atan2(shape.y2 - shape.y1, shape.x2 - shape.x1);
+          offCtx.beginPath();
+          offCtx.moveTo(shape.x2, shape.y2);
+          offCtx.lineTo(
+            shape.x2 - headLength * Math.cos(angle - Math.PI / 6),
+            shape.y2 - headLength * Math.sin(angle - Math.PI / 6),
+          );
+          offCtx.moveTo(shape.x2, shape.y2);
+          offCtx.lineTo(
+            shape.x2 - headLength * Math.cos(angle + Math.PI / 6),
+            shape.y2 - headLength * Math.sin(angle + Math.PI / 6),
+          );
+          offCtx.stroke();
+        }
+      } else if (shape.type === "text") {
+        offCtx.fillStyle = style.strokeColor;
+        offCtx.font = "20px sans-serif";
+        offCtx.textBaseline = "alphabetic";
+        offCtx.fillText(shape.text, shape.x, shape.y);
+      }
+
+      offCtx.restore();
+    });
+
+    // Trigger download
+    const link = document.createElement("a");
+    link.download = filename;
+    link.href = offscreen.toDataURL("image/png");
+    link.click();
+  }
+
   initMouseHandlers() {
     this.canvas.addEventListener("mousedown", this.mouseDownHandler);
     this.canvas.addEventListener("mouseup", this.mouseUpHandler);

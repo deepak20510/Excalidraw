@@ -1,6 +1,6 @@
 import { useEffect, useRef, useState } from "react";
 import { IconButton } from "./IconButton";
-import { ArrowRight, Circle, Eraser, Maximize2, Minus, MousePointer2, Pencil, Plus, RectangleHorizontalIcon, Type } from "lucide-react";
+import { ArrowRight, Circle, Download, Eraser, Maximize2, Minus, MousePointer2, Pencil, Plus, RectangleHorizontalIcon, Type } from "lucide-react";
 import { Game, Shape } from "@/draw/Game";
 
 export type Tool = "circle" | "rect" | "pencil" | "select" | "eraser" | "line" | "arrow" | "text";
@@ -80,7 +80,7 @@ export function Canvas({
         position: "relative"
     }}>
         <canvas ref={canvasRef} width={window.innerWidth} height={window.innerHeight}></canvas>
-        <Topbar setSelectedTool={setSelectedTool} selectedTool={selectedTool} />
+        <Topbar setSelectedTool={setSelectedTool} selectedTool={selectedTool} game={game} />
 
         {/* Zoom Controls */}
         <ZoomControls
@@ -328,9 +328,10 @@ export function Canvas({
     </div>
 }
 
-function Topbar({selectedTool, setSelectedTool}: {
+function Topbar({selectedTool, setSelectedTool, game}: {
     selectedTool: Tool,
-    setSelectedTool: (s: Tool) => void
+    setSelectedTool: (s: Tool) => void,
+    game: Game | undefined,
 }) {
     return <div style={{
             position: "fixed",
@@ -374,6 +375,12 @@ function Topbar({selectedTool, setSelectedTool}: {
                 <IconButton onClick={() => {
                     setSelectedTool("text")
                 }} activated={selectedTool === "text"} icon={<Type />}></IconButton>
+                <div style={{ width: 1, height: 24, background: "rgba(255,255,255,0.15)", margin: "0 2px", alignSelf: "center" }} />
+                <IconButton
+                    onClick={() => game?.exportAsPNG()}
+                    activated={false}
+                    icon={<Download />}
+                />
             </div>
         </div>
 }
