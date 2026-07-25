@@ -25,6 +25,17 @@ export type Shape =
     }
   | {
       id?: number | string;
+      type: "diamond";
+      x: number;
+      y: number;
+      width: number;
+      height: number;
+      style?: ShapeStyle;
+      seed?: number;
+      updatedAt?: number;
+    }
+  | {
+      id?: number | string;
       type: "circle";
       centerX: number;
       centerY: number;
@@ -72,6 +83,18 @@ export type Shape =
       style?: ShapeStyle;
       seed?: number;
       updatedAt?: number;
+    }
+  | {
+      id?: number | string;
+      type: "image";
+      x: number;
+      y: number;
+      width: number;
+      height: number;
+      src: string;
+      style?: ShapeStyle;
+      seed?: number;
+      updatedAt?: number;
     };
 
 // Palette of visually distinct colors for remote cursors
@@ -115,9 +138,10 @@ export class Game {
   private dragOffsetX = 0;
   private dragOffsetY = 0;
 
-  // Active Style state (for new shapes), Selection callback, and Zoom callback
+  // Active Style state (for new shapes), Selection callback, Zoom callback, and Tool callback
   public onSelectionChange?: (selectedShape: Shape | null) => void;
   public onZoomChange?: (scale: number) => void;
+  public onToolChange?: (tool: Tool) => void;
   private activeStyle: ShapeStyle = {
     strokeColor: "#ffffff",
     fillColor: "transparent",
@@ -267,8 +291,19 @@ export class Game {
       this.triggerSelectionCallback();
       this.clearCanvas();
     }
-    // Visual cursor feedback for eraser
-    this.canvas.style.cursor = tool === "eraser" ? "crosshair" : "default";
+    // Visual cursor feedback per tool
+    if (tool === "hand") {
+      this.canvas.style.cursor = "grab";
+    } else if (tool === "text") {
+      this.canvas.style.cursor = "text";
+    } else if (tool === "select") {
+      this.canvas.style.cursor = "default";
+    } else {
+      this.canvas.style.cursor = "crosshair";
+    }
+    if (this.onToolChange) {
+      this.onToolChange(tool);
+    }
   }
 
   async init() {
@@ -447,7 +482,7 @@ export class Game {
     maxX: number;
     maxY: number;
   } {
-    if (shape.type === "rect") {
+    if (shape.type === "rect" || shape.type === "diamond" || shape.type === "image") {
       const minX = Math.min(shape.x, shape.x + shape.width);
       const maxX = Math.max(shape.x, shape.x + shape.width);
       const minY = Math.min(shape.y, shape.y + shape.height);
@@ -499,7 +534,7 @@ export class Game {
 
   /** Hit-test a world-space point against a shape */
   private hitTestShape(shape: Shape, wx: number, wy: number): boolean {
-    if (shape.type === "rect") {
+    if (shape.type === "rect" || shape.type === "image") {
       const bounds = this.getShapeBounds(shape);
       return (
         wx >= bounds.minX &&
@@ -507,6 +542,15 @@ export class Game {
         wy >= bounds.minY &&
         wy <= bounds.maxY
       );
+    } else if (shape.type === "diamond") {
+      const bounds = this.getShapeBounds(shape);
+      if (wx < bounds.minX || wx > bounds.maxX || wy < bounds.minY || wy > bounds.maxY) return false;
+      const cx = bounds.minX + (bounds.maxX - bounds.minX) / 2;
+      const cy = bounds.minY + (bounds.maxY - bounds.minY) / 2;
+      const halfW = (bounds.maxX - bounds.minX) / 2;
+      const halfH = (bounds.maxY - bounds.minY) / 2;
+      if (halfW === 0 || halfH === 0) return false;
+      return Math.abs(wx - cx) / halfW + Math.abs(wy - cy) / halfH <= 1.05;
     } else if (shape.type === "circle") {
       const dx = wx - shape.centerX;
       const dy = wy - shape.centerY;
@@ -575,7 +619,7 @@ export class Game {
 
   /** Translate a shape by (dx, dy) in world coordinates */
   private moveShape(shape: Shape, dx: number, dy: number) {
-    if (shape.type === "rect") {
+    if (shape.type === "rect" || shape.type === "diamond" || shape.type === "image") {
       shape.x += dx;
       shape.y += dy;
     } else if (shape.type === "circle") {
@@ -833,6 +877,29 @@ export class Game {
             this.ctx.fillRect(shape.x, shape.y, shape.width, shape.height);
           }
           this.ctx.strokeRect(shape.x, shape.y, shape.width, shape.height);
+        }
+      } else if (shape.type === "diamond") {
+        const cx = shape.x + shape.width / 2;
+        const cy = shape.y + shape.height / 2;
+        const pts: [number, number][] = [
+          [cx, shape.y],
+          [shape.x + shape.width, cy],
+          [cx, shape.y + shape.height],
+          [shape.x, cy],
+        ];
+        if (style.roughness > 0) {
+          rc.polygon(pts, roughOptions);
+        } else {
+          this.ctx.beginPath();
+          this.ctx.moveTo(cx, shape.y);
+          this.ctx.lineTo(shape.x + shape.width, cy);
+          this.ctx.lineTo(cx, shape.y + shape.height);
+          this.ctx.lineTo(shape.x, cy);
+          this.ctx.closePath();
+          if (style.fillColor !== "transparent") {
+            this.ctx.fill();
+          }
+          this.ctx.stroke();
         }
       } else if (shape.type === "circle") {
         if (style.roughness > 0) {
@@ -1186,6 +1253,32 @@ export class Game {
       this.pushHistory();
       this.clearCanvas();
     }
+
+    // Tool shortcuts (V, H, R, D, E, A, L, P, T, X) when no modifier keys are pressed
+    if (!e.ctrlKey && !e.metaKey && !e.altKey) {
+      const key = e.key.toLowerCase();
+      if (key === "v") {
+        this.setTool("select");
+      } else if (key === "h") {
+        this.setTool("hand");
+      } else if (key === "r") {
+        this.setTool("rect");
+      } else if (key === "d") {
+        this.setTool("diamond");
+      } else if (key === "e") {
+        this.setTool("circle");
+      } else if (key === "a") {
+        this.setTool("arrow");
+      } else if (key === "l") {
+        this.setTool("line");
+      } else if (key === "p") {
+        this.setTool("pencil");
+      } else if (key === "t") {
+        this.setTool("text");
+      } else if (key === "x") {
+        this.setTool("eraser");
+      }
+    }
   };
 
   keyUpHandler = (e: KeyboardEvent) => {
@@ -1416,6 +1509,17 @@ export class Game {
         seed: Math.floor(Math.random() * 2000000000),
         updatedAt: now,
       };
+    } else if (selectedTool === "diamond") {
+      shape = {
+        type: "diamond",
+        x: this.startX,
+        y: this.startY,
+        height,
+        width,
+        style: { ...this.activeStyle },
+        seed: Math.floor(Math.random() * 2000000000),
+        updatedAt: now,
+      };
     } else if (selectedTool === "circle") {
       const radius = Math.max(Math.abs(width), Math.abs(height)) / 2;
       shape = {
@@ -1565,6 +1669,16 @@ export class Game {
 
     if (selectedTool === "rect") {
       this.ctx.strokeRect(this.startX, this.startY, width, height);
+    } else if (selectedTool === "diamond") {
+      const cx = this.startX + width / 2;
+      const cy = this.startY + height / 2;
+      this.ctx.beginPath();
+      this.ctx.moveTo(cx, this.startY);
+      this.ctx.lineTo(currentX, cy);
+      this.ctx.lineTo(cx, currentY);
+      this.ctx.lineTo(this.startX, cy);
+      this.ctx.closePath();
+      this.ctx.stroke();
     } else if (selectedTool === "circle") {
       const radius = Math.max(Math.abs(width), Math.abs(height)) / 2;
       const centerX = this.startX + (width > 0 ? radius : -radius);
