@@ -41,6 +41,49 @@ interface User {
   userId: string;
 }
 const users: User[] = [];
+// Operational Transform / Conflict Resolution (Last-Write-Wins with timestamps)
+const roomShapeTimestamps = new Map<number, Map<string | number, number>>();
+
+function getShapeKey(shape: any, fallbackIndex?: number): string | number {
+  if (shape && shape.id !== undefined && shape.id !== null) {
+    return `id_${shape.id}`;
+  }
+  if (shape && shape.seed !== undefined && shape.seed !== null) {
+    return `seed_${shape.seed}`;
+  }
+  return fallbackIndex !== undefined ? `index_${fallbackIndex}` : "default";
+}
+
+function getShapeTimestamp(shape: any, messageTimestamp?: number): number {
+  if (shape && typeof shape.updatedAt === "number" && !isNaN(shape.updatedAt)) {
+    return shape.updatedAt;
+  }
+  if (typeof messageTimestamp === "number" && !isNaN(messageTimestamp)) {
+    return messageTimestamp;
+  }
+  return Date.now();
+}
+
+function checkAndUpdateLWW(
+  roomId: number,
+  shapeKey: string | number,
+  incomingTimestamp: number
+): { accepted: boolean; currentTimestamp: number } {
+  let timestamps = roomShapeTimestamps.get(roomId);
+  if (!timestamps) {
+    timestamps = new Map<string | number, number>();
+    roomShapeTimestamps.set(roomId, timestamps);
+  }
+
+  const existingTimestamp = timestamps.get(shapeKey) ?? 0;
+
+  if (incomingTimestamp >= existingTimestamp) {
+    timestamps.set(shapeKey, incomingTimestamp);
+    return { accepted: true, currentTimestamp: incomingTimestamp };
+  } else {
+    return { accepted: false, currentTimestamp: existingTimestamp };
+  }
+}
 
 async function resolveRoomId(roomIdOrSlug: unknown) {
   if (typeof roomIdOrSlug === "number" && Number.isInteger(roomIdOrSlug)) {
@@ -269,11 +312,93 @@ wss.on("connection", async function connection(ws, request) {
         return;
       }
 
-      // Relay mutation messages (delete, move, undo, redo)
+      // Operational Transform / Conflict Resolution (Last-Write-Wins with timestamps)
+      if (parsedData.type === "move_shape") {
+        const roomId = await resolveRoomId(parsedData.roomId);
+        if (!roomId) {
+          return;
+        }
+
+        const shape = parsedData.shape;
+        const shapeIndex = parsedData.shapeIndex;
+        const shapeKey = getShapeKey(shape, shapeIndex);
+        const incomingTimestamp = getShapeTimestamp(shape, parsedData.timestamp);
+
+        // OT / LWW Conflict Resolution check
+        const { accepted } = checkAndUpdateLWW(roomId, shapeKey, incomingTimestamp);
+
+        if (!accepted) {
+          console.log(`[OT/LWW] Conflict on shape ${shapeKey} in room ${roomId}. Rejecting stale move (${incomingTimestamp} < server timestamp).`);
+          const currentShapes = await PrismaClient.shape.findMany({
+            where: { roomId },
+            orderBy: { id: "asc" },
+          });
+          const formattedShapes = currentShapes.map((s) => ({
+            id: s.id,
+            type: s.type,
+            style: s.style,
+            updatedAt: s.updatedAt ? new Date(s.updatedAt).getTime() : Date.now(),
+            ...(s.data as any),
+          }));
+          ws.send(
+            JSON.stringify({
+              type: "sync_shapes",
+              shapes: formattedShapes,
+              roomId,
+            })
+          );
+          return;
+        }
+
+        // Persist updated shape list to DB
+        if (Array.isArray(parsedData.shapes)) {
+          try {
+            await PrismaClient.$transaction([
+              PrismaClient.shape.deleteMany({
+                where: { roomId },
+              }),
+              PrismaClient.shape.createMany({
+                data: parsedData.shapes.map((s: any) => {
+                  const { type, style, ...data } = s || {};
+                  return {
+                    roomId,
+                    userId,
+                    type: type || "unknown",
+                    data: data || {},
+                    style: style || {},
+                  };
+                }),
+              }),
+            ]);
+          } catch (err) {
+            console.error("Failed to sync shapes in DB:", err);
+          }
+        }
+
+        // Broadcast accepted move to other users in room
+        users.forEach((user) => {
+          if (
+            user.ws !== ws &&
+            user.rooms.includes(String(roomId)) &&
+            user.ws.readyState === WebSocket.OPEN
+          ) {
+            user.ws.send(
+              JSON.stringify({
+                ...parsedData,
+                shape: shape ? { ...shape, updatedAt: incomingTimestamp } : shape,
+                timestamp: incomingTimestamp,
+                roomId,
+              })
+            );
+          }
+        });
+        return;
+      }
+
+      // Relay mutation messages (delete_shape, undo, redo)
       // and persist the updated shape list to the database
       if (
         parsedData.type === "delete_shape" ||
-        parsedData.type === "move_shape" ||
         parsedData.type === "undo" ||
         parsedData.type === "redo"
       ) {

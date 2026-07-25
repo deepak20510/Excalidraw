@@ -13,6 +13,7 @@ export type ShapeStyle = {
 
 export type Shape =
   | {
+      id?: number | string;
       type: "rect";
       x: number;
       y: number;
@@ -20,22 +21,28 @@ export type Shape =
       height: number;
       style?: ShapeStyle;
       seed?: number;
+      updatedAt?: number;
     }
   | {
+      id?: number | string;
       type: "circle";
       centerX: number;
       centerY: number;
       radius: number;
       style?: ShapeStyle;
       seed?: number;
+      updatedAt?: number;
     }
   | {
+      id?: number | string;
       type: "pencil";
       points: { x: number; y: number }[];
       style?: ShapeStyle;
       seed?: number;
+      updatedAt?: number;
     }
   | {
+      id?: number | string;
       type: "line";
       x1: number;
       y1: number;
@@ -43,8 +50,10 @@ export type Shape =
       y2: number;
       style?: ShapeStyle;
       seed?: number;
+      updatedAt?: number;
     }
   | {
+      id?: number | string;
       type: "arrow";
       x1: number;
       y1: number;
@@ -52,14 +61,17 @@ export type Shape =
       y2: number;
       style?: ShapeStyle;
       seed?: number;
+      updatedAt?: number;
     }
   | {
+      id?: number | string;
       type: "text";
       x: number;
       y: number;
       text: string;
       style?: ShapeStyle;
       seed?: number;
+      updatedAt?: number;
     };
 
 // Palette of visually distinct colors for remote cursors
@@ -223,6 +235,9 @@ export class Game {
       }
       shape.style = { ...shape.style, ...properties };
 
+      const now = Date.now();
+      shape.updatedAt = now;
+
       // Also update activeStyle so next drawn shape matches
       this.activeStyle = { ...this.activeStyle, ...properties };
 
@@ -237,6 +252,7 @@ export class Game {
           shapeIndex: this.selectedShapeIndex,
           shape,
           shapes: this.existingShapes,
+          timestamp: now,
           roomId: this.roomId,
         }),
       );
@@ -368,12 +384,41 @@ export class Game {
       } else if (message.type === "move_shape") {
         const index = message.shapeIndex as number;
         const movedShape = message.shape;
-        if (index >= 0 && index < this.existingShapes.length && movedShape) {
-          this.existingShapes[index] = movedShape;
-          // Update selected shape reference if it was the one moved
-          if (this.selectedShapeIndex === index) {
-            this.triggerSelectionCallback();
+        if (movedShape) {
+          let targetIndex = -1;
+          if (movedShape.seed !== undefined && movedShape.seed !== null) {
+            targetIndex = this.existingShapes.findIndex((s) => s.seed === movedShape.seed);
+          } else if (movedShape.id !== undefined && movedShape.id !== null) {
+            targetIndex = this.existingShapes.findIndex((s) => s.id === movedShape.id);
           }
+          if (targetIndex === -1 && typeof index === "number" && index >= 0 && index < this.existingShapes.length) {
+            targetIndex = index;
+          }
+
+          if (targetIndex >= 0 && targetIndex < this.existingShapes.length) {
+            const existing = this.existingShapes[targetIndex]!;
+            const incomingTs = movedShape.updatedAt ?? message.timestamp ?? Date.now();
+            const localTs = existing.updatedAt ?? 0;
+
+            if (incomingTs >= localTs) {
+              this.existingShapes[targetIndex] = movedShape;
+              if (this.selectedShapeIndex === targetIndex) {
+                this.triggerSelectionCallback();
+              }
+              this.pushHistory();
+              this.clearCanvas();
+            }
+          } else {
+            this.existingShapes.push(movedShape);
+            this.pushHistory();
+            this.clearCanvas();
+          }
+        }
+      } else if (message.type === "sync_shapes") {
+        if (Array.isArray(message.shapes)) {
+          this.existingShapes = message.shapes;
+          this.selectedShapeIndex = null;
+          this.triggerSelectionCallback();
           this.pushHistory();
           this.clearCanvas();
         }
@@ -1325,15 +1370,18 @@ export class Game {
       this.isDragging = false;
       this.canvas.style.cursor = "default";
       this.pushHistory();
-      // Broadcast the moved shape
+      // Broadcast the moved shape with timestamp for LWW conflict resolution
       if (this.selectedShapeIndex !== null) {
         const shape = this.existingShapes[this.selectedShapeIndex]!;
+        const now = Date.now();
+        shape.updatedAt = now;
         this.socket.send(
           JSON.stringify({
             type: "move_shape",
             shapeIndex: this.selectedShapeIndex,
             shape,
             shapes: this.existingShapes,
+            timestamp: now,
             roomId: this.roomId,
           }),
         );
@@ -1355,6 +1403,7 @@ export class Game {
 
     const selectedTool = this.selectedTool;
     let shape: Shape | null = null;
+    const now = Date.now();
 
     if (selectedTool === "rect") {
       shape = {
@@ -1365,6 +1414,7 @@ export class Game {
         width,
         style: { ...this.activeStyle },
         seed: Math.floor(Math.random() * 2000000000),
+        updatedAt: now,
       };
     } else if (selectedTool === "circle") {
       const radius = Math.max(Math.abs(width), Math.abs(height)) / 2;
@@ -1375,6 +1425,7 @@ export class Game {
         centerY: this.startY + (height > 0 ? radius : -radius),
         style: { ...this.activeStyle },
         seed: Math.floor(Math.random() * 2000000000),
+        updatedAt: now,
       };
     } else if (selectedTool === "pencil") {
       // Add the final point and use the accumulated points
@@ -1384,6 +1435,7 @@ export class Game {
         points: [...this.currentPencilPoints],
         style: { ...this.activeStyle },
         seed: Math.floor(Math.random() * 2000000000),
+        updatedAt: now,
       };
       this.currentPencilPoints = [];
     } else if (selectedTool === "line") {
@@ -1395,6 +1447,7 @@ export class Game {
         y2: endY,
         style: { ...this.activeStyle },
         seed: Math.floor(Math.random() * 2000000000),
+        updatedAt: now,
       };
     } else if (selectedTool === "arrow") {
       shape = {
@@ -1405,6 +1458,7 @@ export class Game {
         y2: endY,
         style: { ...this.activeStyle },
         seed: Math.floor(Math.random() * 2000000000),
+        updatedAt: now,
       };
     }
 
@@ -1615,6 +1669,7 @@ export class Game {
           text,
           style: { ...this.activeStyle },
           seed: Math.floor(Math.random() * 2000000000),
+          updatedAt: Date.now(),
         };
         this.existingShapes.push(newShape);
         this.pushHistory();

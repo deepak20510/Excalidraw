@@ -248,8 +248,10 @@ app.get("/chats/:roomId", async (req, res) => {
     const messages = shapes.map((shape) => ({
       message: JSON.stringify({
         shape: {
+          id: shape.id,
           type: shape.type,
           style: shape.style,
+          updatedAt: shape.updatedAt ? new Date(shape.updatedAt).getTime() : undefined,
           ...(shape.data as any),
         },
       }),
