@@ -4,6 +4,7 @@ import { WS_URL } from "@/config";
 import { useEffect, useState } from "react";
 import { Canvas } from "./Canvas";
 import { useRouter } from "next/navigation";
+import { PencilLine, Sparkles } from "lucide-react";
 
 /** Decode a JWT payload without verifying signature (client-side only) */
 function decodeJwt(token: string): Record<string, unknown> {
@@ -123,10 +124,24 @@ export function RoomCanvas({ roomId }: { roomId: string }) {
 
   if (!socket) {
     return (
-      <div className="w-screen h-screen flex justify-center items-center bg-[#030712] text-slate-400 font-sans">
-        <div className="flex flex-col items-center gap-3">
-          <div className="w-6 h-6 border-2 border-indigo-500 border-t-transparent rounded-full animate-spin" />
-          <span>{connectionError || "Connecting to whiteboard server..."}</span>
+      <div className="w-screen h-screen flex justify-center items-center bg-[#030712] text-slate-100 font-sans relative overflow-hidden select-none">
+        <div className="absolute inset-0 bg-[linear-gradient(to_right,#1f293710_1px,transparent_1px),linear-gradient(to_bottom,#1f293710_1px,transparent_1px)] bg-[size:4rem_4rem] [mask-image:radial-gradient(ellipse_60%_50%_at_50%_50%,#000_70%,transparent_100%)] pointer-events-none" />
+        <div className="absolute top-1/2 left-1/2 -translate-x-1/2 -translate-y-1/2 w-[400px] h-[400px] bg-indigo-600/15 rounded-full blur-[120px] pointer-events-none animate-pulse" />
+
+        <div className="relative p-8 bg-zinc-900/90 border border-white/10 rounded-3xl shadow-2xl backdrop-blur-2xl flex flex-col items-center gap-4 text-center max-w-sm mx-4 animate-in fade-in zoom-in-95 duration-200">
+          <div className="bg-gradient-to-tr from-indigo-500 via-purple-500 to-pink-500 p-3 rounded-2xl shadow-lg shadow-indigo-500/30 animate-bounce">
+            <PencilLine className="w-6 h-6 text-white" />
+          </div>
+          <div>
+            <h3 className="text-lg font-extrabold text-white">DraftBoard Engine</h3>
+            <p className="text-xs text-zinc-400 mt-1">
+              {connectionError || "Establishing secure WebSocket channel..."}
+            </p>
+          </div>
+          <div className="flex items-center gap-2 text-xs font-medium text-indigo-400 bg-indigo-500/10 border border-indigo-500/20 px-4 py-2 rounded-xl">
+            <div className="w-4 h-4 border-2 border-indigo-400 border-t-transparent rounded-full animate-spin" />
+            <span>Syncing Room #{roomId}...</span>
+          </div>
         </div>
       </div>
     );
