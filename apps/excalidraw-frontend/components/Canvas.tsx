@@ -1,7 +1,11 @@
 import { useEffect, useRef, useState } from "react";
 import { IconButton } from "./IconButton";
 import {
+  ArrowDown,
   ArrowRight,
+  ArrowUp,
+  ChevronsDown,
+  ChevronsUp,
   Circle,
   Diamond,
   Download,
@@ -14,6 +18,7 @@ import {
   Plus,
   RectangleHorizontalIcon,
   Redo2,
+  Trash2,
   Type,
   Undo2,
 } from "lucide-react";
@@ -24,11 +29,34 @@ export type Tool =
   | "hand"
   | "rect"
   | "diamond"
-  | "circle" | "arrow"
+  | "circle"
+  | "arrow"
   | "line"
   | "pencil"
   | "text"
   | "eraser";
+
+const STROKE_PRESETS = [
+  "#ffffff",
+  "#94a3b8",
+  "#ef4444",
+  "#f97316",
+  "#eab308",
+  "#22c55e",
+  "#06b6d4",
+  "#3b82f6",
+  "#8b5cf6",
+  "#ec4899",
+];
+
+const FILL_PRESETS = [
+  "rgba(239, 68, 68, 0.3)",
+  "rgba(249, 115, 22, 0.3)",
+  "rgba(234, 179, 8, 0.3)",
+  "rgba(34, 197, 94, 0.3)",
+  "rgba(59, 130, 246, 0.3)",
+  "rgba(168, 85, 247, 0.3)",
+];
 
 export function Canvas({
   roomId,
@@ -128,31 +156,35 @@ export function Canvas({
         />
       </div>
 
-      {/* Shape Style Inspector */}
+      {/* Left-Side Properties Panel (Animates in when a shape is selected) */}
       {selectedShape && (
-        <div className="fixed left-4 top-20 w-64 bg-zinc-900/90 backdrop-blur-2xl border border-white/10 rounded-2xl p-4 text-white shadow-2xl z-40 flex flex-col gap-4 animate-in fade-in slide-in-from-left-4 duration-200">
-          <div className="flex items-center justify-between border-b border-white/10 pb-2">
-            <h3 className="text-xs font-bold uppercase tracking-wider text-zinc-400">
-              Shape Properties
-            </h3>
-            <span className="text-[10px] font-mono uppercase bg-indigo-500/20 text-indigo-300 border border-indigo-500/30 px-2 py-0.5 rounded-full">
+        <div className="fixed left-4 top-20 w-72 max-h-[calc(100vh-6rem)] overflow-y-auto bg-zinc-900/95 backdrop-blur-2xl border border-white/10 rounded-2xl p-4 text-white shadow-2xl z-40 flex flex-col gap-4 animate-in fade-in slide-in-from-left-4 duration-200">
+          {/* Header */}
+          <div className="flex items-center justify-between border-b border-white/10 pb-2.5">
+            <div className="flex items-center gap-2">
+              <span className="w-2 h-2 rounded-full bg-indigo-500 animate-pulse" />
+              <h3 className="text-xs font-bold uppercase tracking-wider text-zinc-300">
+                Shape Properties
+              </h3>
+            </div>
+            <span className="text-[10px] font-mono font-semibold uppercase bg-indigo-500/20 text-indigo-300 border border-indigo-500/30 px-2 py-0.5 rounded-full">
               {selectedShape.type}
             </span>
           </div>
 
-          {/* Stroke Color */}
+          {/* Stroke Color (10 Swatches + Custom Picker) */}
           <div className="flex flex-col gap-2">
             <span className="text-[11px] font-semibold text-zinc-400">
               Stroke Color
             </span>
-            <div className="flex items-center gap-2">
-              {["#ffffff", "#ef4444", "#22c55e", "#3b82f6", "#eab308", "#a855f7"].map((c) => (
+            <div className="grid grid-cols-6 gap-1.5 items-center">
+              {STROKE_PRESETS.map((c) => (
                 <button
                   key={c}
                   onClick={() =>
                     game?.updateSelectedShapeStyle({ strokeColor: c })
                   }
-                  className={`w-5 h-5 rounded-full border transition-transform hover:scale-110 ${
+                  className={`w-6 h-6 rounded-full border transition-transform hover:scale-110 flex items-center justify-center ${
                     (selectedShape.style?.strokeColor || "#ffffff") === c
                       ? "ring-2 ring-indigo-500 scale-110 border-white"
                       : "border-white/20"
@@ -161,50 +193,54 @@ export function Canvas({
                   title={c}
                 />
               ))}
-              <input
-                type="color"
-                value={selectedShape.style?.strokeColor || "#ffffff"}
-                onChange={(e) =>
-                  game?.updateSelectedShapeStyle({ strokeColor: e.target.value })
-                }
-                className="w-6 h-6 rounded-lg bg-transparent border-0 cursor-pointer p-0"
-              />
+              {/* Custom Color Input */}
+              <label
+                className="w-6 h-6 rounded-full border border-white/20 cursor-pointer overflow-hidden relative flex items-center justify-center bg-gradient-to-tr from-indigo-500 via-purple-500 to-pink-500 hover:scale-110 transition-transform"
+                title="Custom color"
+              >
+                <input
+                  type="color"
+                  value={selectedShape.style?.strokeColor || "#ffffff"}
+                  onChange={(e) =>
+                    game?.updateSelectedShapeStyle({
+                      strokeColor: e.target.value,
+                    })
+                  }
+                  className="opacity-0 absolute inset-0 w-full h-full cursor-pointer"
+                />
+              </label>
             </div>
           </div>
 
-          {/* Fill Color */}
+          {/* Fill Color + Custom Picker */}
           <div className="flex flex-col gap-2">
             <span className="text-[11px] font-semibold text-zinc-400">
-              Background Fill
+              Fill Color
             </span>
-            <div className="flex items-center gap-2">
+            <div className="grid grid-cols-7 gap-1.5 items-center">
+              {/* Transparent */}
               <button
                 onClick={() =>
                   game?.updateSelectedShapeStyle({ fillColor: "transparent" })
                 }
-                className={`w-5 h-5 rounded-full border relative overflow-hidden transition-transform hover:scale-110 ${
+                className={`w-6 h-6 rounded-full border relative overflow-hidden transition-transform hover:scale-110 ${
                   (selectedShape.style?.fillColor || "transparent") ===
                   "transparent"
                     ? "ring-2 ring-indigo-500 scale-110 border-white"
-                    : "border-white/20"
+                    : "border-white/20 bg-zinc-800"
                 }`}
-                title="Transparent"
+                title="Transparent fill"
               >
-                <div className="absolute inset-0 bg-gradient-to-tr from-transparent via-red-500 to-transparent w-full h-[2px] top-1/2 -translate-y-1/2" />
+                <div className="absolute inset-0 bg-red-500/80 w-full h-[2px] top-1/2 -translate-y-1/2 rotate-45" />
               </button>
-              {[
-                "rgba(239, 68, 68, 0.3)",
-                "rgba(34, 197, 94, 0.3)",
-                "rgba(59, 130, 246, 0.3)",
-                "rgba(234, 179, 8, 0.3)",
-                "rgba(168, 85, 247, 0.3)",
-              ].map((c) => (
+
+              {FILL_PRESETS.map((c) => (
                 <button
                   key={c}
                   onClick={() =>
                     game?.updateSelectedShapeStyle({ fillColor: c })
                   }
-                  className={`w-5 h-5 rounded-full border transition-transform hover:scale-110 ${
+                  className={`w-6 h-6 rounded-full border transition-transform hover:scale-110 ${
                     (selectedShape.style?.fillColor || "transparent") === c
                       ? "ring-2 ring-indigo-500 scale-110 border-white"
                       : "border-white/20"
@@ -213,49 +249,133 @@ export function Canvas({
                   title={c}
                 />
               ))}
-              <input
-                type="color"
-                value={
-                  selectedShape.style?.fillColor &&
-                  selectedShape.style.fillColor !== "transparent"
-                    ? selectedShape.style.fillColor
-                    : "#000000"
-                }
-                onChange={(e) =>
-                  game?.updateSelectedShapeStyle({ fillColor: e.target.value })
-                }
-                className="w-6 h-6 rounded-lg bg-transparent border-0 cursor-pointer p-0"
-              />
+
+              {/* Custom Fill Color Input */}
+              <label
+                className="w-6 h-6 rounded-full border border-white/20 cursor-pointer overflow-hidden relative flex items-center justify-center bg-gradient-to-tr from-emerald-500 via-blue-500 to-purple-500 hover:scale-110 transition-transform"
+                title="Custom fill color"
+              >
+                <input
+                  type="color"
+                  value={
+                    selectedShape.style?.fillColor &&
+                    selectedShape.style.fillColor !== "transparent"
+                      ? selectedShape.style.fillColor
+                      : "#000000"
+                  }
+                  onChange={(e) =>
+                    game?.updateSelectedShapeStyle({
+                      fillColor: e.target.value,
+                    })
+                  }
+                  className="opacity-0 absolute inset-0 w-full h-full cursor-pointer"
+                />
+              </label>
             </div>
           </div>
 
-          {/* Stroke Width */}
-          <div className="flex flex-col gap-1.5">
-            <div className="flex justify-between text-[11px] font-semibold text-zinc-400">
-              <span>Stroke Thickness</span>
-              <span className="text-zinc-200 font-mono">
+          {/* Fill Style (Solid / Hatch / Cross-Hatch) */}
+          <div className="flex flex-col gap-2">
+            <span className="text-[11px] font-semibold text-zinc-400">
+              Fill Style
+            </span>
+            <div className="grid grid-cols-3 gap-1.5">
+              {[
+                { label: "Solid", val: "solid" },
+                { label: "Hatch", val: "hatch" },
+                { label: "Cross-Hatch", val: "cross-hatch" },
+              ].map((style) => {
+                const isSelected =
+                  (selectedShape.style?.fillStyle || "solid") === style.val;
+                return (
+                  <button
+                    key={style.val}
+                    onClick={() =>
+                      game?.updateSelectedShapeStyle({
+                        fillStyle: style.val as "solid" | "hatch" | "cross-hatch",
+                      })
+                    }
+                    className={`py-1.5 text-[11px] font-medium rounded-xl border transition-all ${
+                      isSelected
+                        ? "bg-indigo-600/30 border-indigo-500 text-indigo-300 font-semibold"
+                        : "bg-zinc-800/60 border-white/5 text-zinc-400 hover:text-zinc-200"
+                    }`}
+                  >
+                    {style.label}
+                  </button>
+                );
+              })}
+            </div>
+          </div>
+
+          {/* Stroke Width (Thin / Normal / Bold) */}
+          <div className="flex flex-col gap-2">
+            <div className="flex justify-between items-center text-[11px] font-semibold text-zinc-400">
+              <span>Stroke Width</span>
+              <span className="text-zinc-200 font-mono text-[10px]">
                 {selectedShape.style?.strokeWidth ?? 2}px
               </span>
             </div>
-            <input
-              type="range"
-              min="1"
-              max="10"
-              value={selectedShape.style?.strokeWidth ?? 2}
-              onChange={(e) =>
-                game?.updateSelectedShapeStyle({
-                  strokeWidth: Number(e.target.value),
-                })
-              }
-              className="w-full accent-indigo-500 h-1.5 bg-zinc-800 rounded-lg cursor-pointer"
-            />
+            <div className="grid grid-cols-3 gap-1.5">
+              {[
+                { label: "Thin", val: 2 },
+                { label: "Normal", val: 4 },
+                { label: "Bold", val: 6 },
+              ].map((w) => {
+                const isSelected =
+                  (selectedShape.style?.strokeWidth ?? 2) === w.val;
+                return (
+                  <button
+                    key={w.val}
+                    onClick={() =>
+                      game?.updateSelectedShapeStyle({ strokeWidth: w.val })
+                    }
+                    className={`py-1.5 text-[11px] font-medium rounded-xl border transition-all ${
+                      isSelected
+                        ? "bg-indigo-600/30 border-indigo-500 text-indigo-300 font-semibold"
+                        : "bg-zinc-800/60 border-white/5 text-zinc-400 hover:text-zinc-200"
+                    }`}
+                  >
+                    {w.label}
+                  </button>
+                );
+              })}
+            </div>
           </div>
 
-          {/* Opacity */}
+          {/* Stroke Style (Solid / Dashed / Dotted) */}
+          <div className="flex flex-col gap-2">
+            <span className="text-[11px] font-semibold text-zinc-400">
+              Stroke Style
+            </span>
+            <div className="grid grid-cols-3 gap-1.5">
+              {(["solid", "dashed", "dotted"] as const).map((s) => {
+                const isSelected =
+                  (selectedShape.style?.strokeStyle || "solid") === s;
+                return (
+                  <button
+                    key={s}
+                    onClick={() =>
+                      game?.updateSelectedShapeStyle({ strokeStyle: s })
+                    }
+                    className={`py-1.5 text-[11px] font-medium rounded-xl capitalize border transition-all ${
+                      isSelected
+                        ? "bg-indigo-600/30 border-indigo-500 text-indigo-300 font-semibold"
+                        : "bg-zinc-800/60 border-white/5 text-zinc-400 hover:text-zinc-200"
+                    }`}
+                  >
+                    {s}
+                  </button>
+                );
+              })}
+            </div>
+          </div>
+
+          {/* Opacity Slider */}
           <div className="flex flex-col gap-1.5">
             <div className="flex justify-between text-[11px] font-semibold text-zinc-400">
               <span>Opacity</span>
-              <span className="text-zinc-200 font-mono">
+              <span className="text-zinc-200 font-mono text-[10px]">
                 {Math.round((selectedShape.style?.opacity ?? 1) * 100)}%
               </span>
             </div>
@@ -274,63 +394,44 @@ export function Canvas({
             />
           </div>
 
-          {/* Stroke Style */}
-          <div className="flex flex-col gap-2">
+          {/* Layer Controls */}
+          <div className="flex flex-col gap-2 pt-1 border-t border-white/10">
             <span className="text-[11px] font-semibold text-zinc-400">
-              Stroke Pattern
+              Layer Order
             </span>
-            <div className="grid grid-cols-3 gap-1.5">
-              {(["solid", "dashed", "dotted"] as const).map((s) => {
-                const isSelected =
-                  (selectedShape.style?.strokeStyle || "solid") === s;
-                return (
-                  <button
-                    key={s}
-                    onClick={() =>
-                      game?.updateSelectedShapeStyle({ strokeStyle: s })
-                    }
-                    className={`py-1.5 text-[11px] font-medium rounded-lg capitalize border transition-all ${
-                      isSelected
-                        ? "bg-indigo-600/30 border-indigo-500 text-indigo-300"
-                        : "bg-zinc-800/60 border-white/5 text-zinc-400 hover:text-zinc-200"
-                    }`}
-                  >
-                    {s}
-                  </button>
-                );
-              })}
-            </div>
-          </div>
-
-          {/* Roughness */}
-          <div className="flex flex-col gap-2">
-            <span className="text-[11px] font-semibold text-zinc-400">
-              Sloppiness (Hand-drawn)
-            </span>
-            <div className="grid grid-cols-3 gap-1.5">
-              {[
-                { label: "Architect", val: 0 },
-                { label: "Artist", val: 1 },
-                { label: "Cartoon", val: 2 },
-              ].map((r) => {
-                const isSelected =
-                  (selectedShape.style?.roughness ?? 0) === r.val;
-                return (
-                  <button
-                    key={r.val}
-                    onClick={() =>
-                      game?.updateSelectedShapeStyle({ roughness: r.val })
-                    }
-                    className={`py-1.5 text-[11px] font-medium rounded-lg border transition-all ${
-                      isSelected
-                        ? "bg-indigo-600/30 border-indigo-500 text-indigo-300"
-                        : "bg-zinc-800/60 border-white/5 text-zinc-400 hover:text-zinc-200"
-                    }`}
-                  >
-                    {r.label}
-                  </button>
-                );
-              })}
+            <div className="grid grid-cols-4 gap-1">
+              <button
+                onClick={() => game?.bringToFront()}
+                className="flex flex-col items-center justify-center p-2 rounded-xl bg-zinc-800/60 hover:bg-white/10 border border-white/5 text-zinc-300 transition-colors text-[10px]"
+                title="Bring to Front"
+              >
+                <ChevronsUp size={14} />
+                <span className="mt-0.5 font-semibold">Front</span>
+              </button>
+              <button
+                onClick={() => game?.bringForward()}
+                className="flex flex-col items-center justify-center p-2 rounded-xl bg-zinc-800/60 hover:bg-white/10 border border-white/5 text-zinc-300 transition-colors text-[10px]"
+                title="Bring Forward"
+              >
+                <ArrowUp size={14} />
+                <span className="mt-0.5 font-semibold">Forward</span>
+              </button>
+              <button
+                onClick={() => game?.sendBackward()}
+                className="flex flex-col items-center justify-center p-2 rounded-xl bg-zinc-800/60 hover:bg-white/10 border border-white/5 text-zinc-300 transition-colors text-[10px]"
+                title="Send Backward"
+              >
+                <ArrowDown size={14} />
+                <span className="mt-0.5 font-semibold">Backward</span>
+              </button>
+              <button
+                onClick={() => game?.sendToBack()}
+                className="flex flex-col items-center justify-center p-2 rounded-xl bg-zinc-800/60 hover:bg-white/10 border border-white/5 text-zinc-300 transition-colors text-[10px]"
+                title="Send to Back"
+              >
+                <ChevronsDown size={14} />
+                <span className="mt-0.5 font-semibold">Back</span>
+              </button>
             </div>
           </div>
         </div>
@@ -477,7 +578,7 @@ function ZoomControls({
       <button
         title="Zoom out"
         onClick={onZoomOut}
-        className="w-8 h-8 flex items-center justify-center rounded-xl text-zinc-400 hover:text-zinc-100 hover:bg-white/10 transition-colors"
+        className="w-8 h-8 flex items-center justify-center rounded-xl text-zinc-400 hover:text-zinc-100 hover:bg-white/10 transition-colors cursor-pointer"
       >
         <Minus size={14} />
       </button>
@@ -487,7 +588,7 @@ function ZoomControls({
       <button
         title="Reset zoom (100%)"
         onClick={onResetZoom}
-        className="px-2 h-8 flex items-center justify-center rounded-xl text-xs font-mono font-semibold text-zinc-300 hover:text-zinc-100 hover:bg-white/10 transition-colors"
+        className="px-2 h-8 flex items-center justify-center rounded-xl text-xs font-mono font-semibold text-zinc-300 hover:text-zinc-100 hover:bg-white/10 transition-colors cursor-pointer"
       >
         {zoomLevel}%
       </button>
@@ -497,7 +598,7 @@ function ZoomControls({
       <button
         title="Zoom in"
         onClick={onZoomIn}
-        className="w-8 h-8 flex items-center justify-center rounded-xl text-zinc-400 hover:text-zinc-100 hover:bg-white/10 transition-colors"
+        className="w-8 h-8 flex items-center justify-center rounded-xl text-zinc-400 hover:text-zinc-100 hover:bg-white/10 transition-colors cursor-pointer"
       >
         <Plus size={14} />
       </button>
@@ -507,7 +608,7 @@ function ZoomControls({
       <button
         title="Fit all shapes to screen"
         onClick={onFitToScreen}
-        className="w-8 h-8 flex items-center justify-center rounded-xl text-zinc-400 hover:text-zinc-100 hover:bg-white/10 transition-colors"
+        className="w-8 h-8 flex items-center justify-center rounded-xl text-zinc-400 hover:text-zinc-100 hover:bg-white/10 transition-colors cursor-pointer"
       >
         <Maximize2 size={14} />
       </button>

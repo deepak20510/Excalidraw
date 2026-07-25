@@ -9,6 +9,7 @@ export type ShapeStyle = {
   opacity: number;
   strokeStyle: "solid" | "dashed" | "dotted";
   roughness: number;
+  fillStyle?: "solid" | "hatch" | "cross-hatch";
 };
 
 export type Shape =
@@ -353,6 +354,68 @@ export class Game {
       this.triggerSelectionCallback();
       this.clearCanvas();
     }
+  }
+
+  bringToFront() {
+    if (this.selectedShapeIndex === null || this.selectedShapeIndex >= this.existingShapes.length - 1) return;
+    const [shape] = this.existingShapes.splice(this.selectedShapeIndex, 1);
+    if (shape) {
+      this.existingShapes.push(shape);
+      this.selectedShapeIndex = this.existingShapes.length - 1;
+      this.triggerSelectionCallback();
+      this.pushHistory();
+      this.clearCanvas();
+      this.syncShapesToSocket();
+    }
+  }
+
+  sendToBack() {
+    if (this.selectedShapeIndex === null || this.selectedShapeIndex <= 0) return;
+    const [shape] = this.existingShapes.splice(this.selectedShapeIndex, 1);
+    if (shape) {
+      this.existingShapes.unshift(shape);
+      this.selectedShapeIndex = 0;
+      this.triggerSelectionCallback();
+      this.pushHistory();
+      this.clearCanvas();
+      this.syncShapesToSocket();
+    }
+  }
+
+  bringForward() {
+    if (this.selectedShapeIndex === null || this.selectedShapeIndex >= this.existingShapes.length - 1) return;
+    const idx = this.selectedShapeIndex;
+    const temp = this.existingShapes[idx]!;
+    this.existingShapes[idx] = this.existingShapes[idx + 1]!;
+    this.existingShapes[idx + 1] = temp;
+    this.selectedShapeIndex = idx + 1;
+    this.triggerSelectionCallback();
+    this.pushHistory();
+    this.clearCanvas();
+    this.syncShapesToSocket();
+  }
+
+  sendBackward() {
+    if (this.selectedShapeIndex === null || this.selectedShapeIndex <= 0) return;
+    const idx = this.selectedShapeIndex;
+    const temp = this.existingShapes[idx]!;
+    this.existingShapes[idx] = this.existingShapes[idx - 1]!;
+    this.existingShapes[idx - 1] = temp;
+    this.selectedShapeIndex = idx - 1;
+    this.triggerSelectionCallback();
+    this.pushHistory();
+    this.clearCanvas();
+    this.syncShapesToSocket();
+  }
+
+  private syncShapesToSocket() {
+    this.socket.send(
+      JSON.stringify({
+        type: "sync_shapes",
+        shapes: this.existingShapes,
+        roomId: this.roomId,
+      })
+    );
   }
 
   /** Assign a stable color to a remote user's cursor */
@@ -858,7 +921,7 @@ export class Game {
             ? Math.max(2, style.strokeWidth + 1)
             : style.strokeWidth,
         fill: style.fillColor === "transparent" ? undefined : style.fillColor,
-        fillStyle: "solid",
+        fillStyle: style.fillStyle || "solid",
         strokeLineDash,
       };
 
