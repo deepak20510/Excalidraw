@@ -7,6 +7,7 @@ export function IconButton({
   label,
   shortcut,
   title,
+  disabled,
 }: {
   icon: ReactNode;
   onClick: () => void;
@@ -14,6 +15,7 @@ export function IconButton({
   label?: string;
   shortcut?: string;
   title?: string;
+  disabled?: boolean;
 }) {
   const tooltipText = title || (label ? `${label}${shortcut ? ` (${shortcut})` : ""}` : undefined);
 
@@ -21,12 +23,15 @@ export function IconButton({
     <div className="relative group/tool flex items-center justify-center">
       <button
         type="button"
-        onClick={onClick}
+        onClick={disabled ? undefined : onClick}
         aria-label={label || title || "Tool"}
-        className={`relative flex items-center justify-center w-9 h-9 rounded-xl transition-all duration-200 cursor-pointer select-none ${
-          activated
-            ? "bg-gradient-to-b from-indigo-500 to-indigo-600 text-white shadow-lg shadow-indigo-500/30 scale-105 font-medium border border-indigo-400/40 ring-2 ring-indigo-500/20"
-            : "text-zinc-400 hover:text-zinc-100 hover:bg-white/10 active:scale-95 border border-transparent"
+        disabled={disabled}
+        className={`relative flex items-center justify-center w-9 h-9 rounded-xl transition-all duration-200 select-none ${
+          disabled
+            ? "opacity-30 cursor-not-allowed border border-transparent text-zinc-600"
+            : activated
+            ? "cursor-pointer bg-gradient-to-b from-indigo-500 to-indigo-600 text-white shadow-lg shadow-indigo-500/30 scale-105 font-medium border border-indigo-400/40 ring-2 ring-indigo-500/20"
+            : "cursor-pointer text-zinc-400 hover:text-zinc-100 hover:bg-white/10 active:scale-95 border border-transparent"
         }`}
       >
         <div className="w-4 h-4 flex items-center justify-center pointer-events-none">

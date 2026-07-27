@@ -1,4 +1,4 @@
-import { useEffect, useRef, useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 import { IconButton } from "./IconButton";
 import {
   ArrowDown,
@@ -21,8 +21,13 @@ import {
   Trash2,
   Type,
   Undo2,
+  Lock,
 } from "lucide-react";
 import { Game, Shape } from "@/draw/Game";
+import { CollaborationPanel, PresenceMember } from "./CollaborationPanel";
+import { CommandPalette } from "./CommandPalette";
+import { HTTP_BACKEND } from "@/config";
+import { useRouter } from "next/navigation";
 
 export type Tool =
   | "select"
@@ -64,12 +69,20 @@ export function Canvas({
   onReady,
   userId,
   userName,
+  isAdmin = false,
+  isLocked: initialIsLocked = false,
+  roomName = "",
+  initialMemberRoles = {},
 }: {
   socket: WebSocket;
   roomId: string;
   onReady?: () => void;
   userId?: string;
   userName?: string;
+  isAdmin?: boolean;
+  isLocked?: boolean;
+  roomName?: string;
+  initialMemberRoles?: Record<string, "editor" | "viewer">;
 }) {
   const canvasRef = useRef<HTMLCanvasElement>(null);
   const minimapRef = useRef<HTMLCanvasElement>(null);
@@ -77,6 +90,29 @@ export function Canvas({
   const [selectedTool, setSelectedTool] = useState<Tool>("rect");
   const [selectedShape, setSelectedShape] = useState<Shape | null>(null);
   const [zoomLevel, setZoomLevel] = useState<number>(100);
+  const [isLocked, setIsLocked] = useState(initialIsLocked);
+  const [isPaletteOpen, setIsPaletteOpen] = useState(false);
+
+  // Collaboration Panel & Role state
+  const [presenceMembers, setPresenceMembers] = useState<PresenceMember[]>([]);
+  const [memberRoles, setMemberRoles] = useState<Record<string, "editor" | "viewer">>(initialMemberRoles);
+  const [cursorPositions, setCursorPositions] = useState<Map<string, { x: number; y: number }>>(new Map());
+  const [pendingRequests, setPendingRequests] = useState<Array<{ requesterId: string; requesterName: string }>>([]);
+  const [hasRequestedPermission, setHasRequestedPermission] = useState(false);
+
+  const router = useRouter();
+
+  // Keep initialMemberRoles in sync when passed
+  useEffect(() => {
+    if (Object.keys(initialMemberRoles).length > 0) {
+      setMemberRoles((prev) => ({ ...initialMemberRoles, ...prev }));
+    }
+  }, [initialMemberRoles]);
+
+  // Keep isLocked in sync with prop changes (from parent RoomCanvas)
+  useEffect(() => {
+    setIsLocked(initialIsLocked);
+  }, [initialIsLocked]);
 
   useEffect(() => {
     game?.setTool(selectedTool);
@@ -121,6 +157,159 @@ export function Canvas({
     }
   }, [game]);
 
+  // Track remote cursors from Game for "follow" feature
+  useEffect(() => {
+    if (!game) return;
+    const interval = setInterval(() => {
+      const cursors = game.getRemoteCursors();
+      const newPositions = new Map<string, { x: number; y: number }>();
+      cursors.forEach((cursor, uid) => {
+        newPositions.set(uid, { x: cursor.x, y: cursor.y });
+      });
+      setCursorPositions(newPositions);
+    }, 500);
+    return () => clearInterval(interval);
+  }, [game]);
+
+  // WS message handler for presence, room_locked, kicked, role_updated, permission_requested
+  useEffect(() => {
+    function handleMessage(event: MessageEvent) {
+      try {
+        const data = JSON.parse(event.data);
+
+        if (data.type === "presence_update") {
+          const members: PresenceMember[] = data.members ?? [];
+          setPresenceMembers(members);
+        }
+
+        if (data.type === "room_locked") {
+          setIsLocked(true);
+        }
+
+        if (data.type === "room_unlocked") {
+          setIsLocked(false);
+        }
+
+        if (data.type === "kicked") {
+          router.push("/");
+        }
+
+        if (data.type === "role_updated") {
+          setMemberRoles((prev) => ({
+            ...prev,
+            [data.targetUserId]: data.role,
+          }));
+          if (data.targetUserId === userId && data.role === "editor") {
+            setHasRequestedPermission(false);
+          }
+        }
+
+        if (data.type === "permission_requested") {
+          if (isAdmin && data.requesterId && data.requesterName) {
+            setPendingRequests((prev) => [
+              ...prev.filter((r) => r.requesterId !== data.requesterId),
+              { requesterId: data.requesterId, requesterName: data.requesterName },
+            ]);
+          }
+        }
+      } catch (_e) {
+        // ignore parse errors
+      }
+    }
+
+    socket.addEventListener("message", handleMessage);
+
+    // Join room immediately after setting up listener to ensure initial presence_update is captured
+    if (socket.readyState === WebSocket.OPEN) {
+      socket.send(JSON.stringify({ type: "join_room", roomId }));
+    }
+
+    return () => socket.removeEventListener("message", handleMessage);
+  }, [socket, roomId, userId, isAdmin, router]);
+
+  // Global Ctrl+K listener for Command Palette
+  useEffect(() => {
+    function handleKeyDown(e: KeyboardEvent) {
+      if ((e.ctrlKey || e.metaKey) && e.key === "k") {
+        e.preventDefault();
+        setIsPaletteOpen((v) => !v);
+      }
+    }
+    window.addEventListener("keydown", handleKeyDown);
+    return () => window.removeEventListener("keydown", handleKeyDown);
+  }, []);
+
+  // Collaboration Panel action handlers
+  const handleFollowUser = useCallback((targetUserId: string) => {
+    const pos = cursorPositions.get(targetUserId);
+    if (pos && game) {
+      game.panToScreenPosition(pos.x, pos.y);
+    }
+  }, [cursorPositions, game]);
+
+  const handleKickUser = useCallback((targetUserId: string) => {
+    // WS kick
+    socket.send(JSON.stringify({ type: "kick_user", roomId, targetUserId }));
+    // HTTP kick (removes from DB)
+    const token = localStorage.getItem("token");
+    if (token) {
+      fetch(`${HTTP_BACKEND}/room/${roomId}/members/${targetUserId}`, {
+        method: "DELETE",
+        headers: { Authorization: `Bearer ${token}` },
+      }).catch(() => {});
+    }
+  }, [socket, roomId]);
+
+  const handleToggleLock = useCallback(() => {
+    const newLockState = !isLocked;
+    socket.send(JSON.stringify({ type: "lock_room", roomId, isLocked: newLockState }));
+    const token = localStorage.getItem("token");
+    if (token) {
+      fetch(`${HTTP_BACKEND}/room/${roomId}/lock`, {
+        method: "PATCH",
+        headers: { Authorization: `Bearer ${token}` },
+      }).catch(() => {});
+    }
+    setIsLocked(newLockState);
+  }, [isLocked, socket, roomId]);
+
+  const handleSetRole = useCallback((targetUserId: string, role: "editor" | "viewer") => {
+    setMemberRoles((prev) => ({ ...prev, [targetUserId]: role }));
+    socket.send(JSON.stringify({ type: "set_role", roomId, targetUserId, role }));
+    const token = localStorage.getItem("token");
+    if (token) {
+      fetch(`${HTTP_BACKEND}/room/${roomId}/members`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json", Authorization: `Bearer ${token}` },
+        body: JSON.stringify({ userId: targetUserId, role }),
+      }).catch(() => {});
+    }
+  }, [socket, roomId]);
+
+  const handleGrantPermission = useCallback((requesterId: string) => {
+    handleSetRole(requesterId, "editor");
+    setPendingRequests((prev) => prev.filter((r) => r.requesterId !== requesterId));
+  }, [handleSetRole]);
+
+  const handleDeclinePermission = useCallback((requesterId: string) => {
+    setPendingRequests((prev) => prev.filter((r) => r.requesterId !== requesterId));
+  }, []);
+
+  const handleSendPermissionRequest = useCallback(() => {
+    if (socket.readyState === WebSocket.OPEN) {
+      socket.send(JSON.stringify({ type: "request_permission", roomId }));
+      setHasRequestedPermission(true);
+    }
+  }, [socket, roomId]);
+
+  const handleCreateRoom = useCallback(() => {
+    router.push("/");
+  }, [router]);
+
+  // Determine current user's role and whether they can draw
+  const myRole = memberRoles[userId ?? ""] ?? "editor";
+  const canDraw = isAdmin || (!isLocked && myRole === "editor");
+
   return (
     <div className="h-screen w-screen overflow-hidden relative bg-[#09090b] select-none font-sans">
       <canvas
@@ -130,11 +319,33 @@ export function Canvas({
         className="block w-full h-full touch-none"
       />
 
+      {/* View-Only / Locked overlay banner */}
+      {!canDraw && (
+        <div className="fixed top-20 left-1/2 -translate-x-1/2 z-50 flex items-center gap-3 bg-red-500/20 border border-red-500/30 text-red-300 text-xs font-semibold px-4 py-2 rounded-full backdrop-blur-xl shadow-lg animate-in fade-in slide-in-from-top-2 duration-300">
+          <Lock size={12} />
+          <span>
+            {isLocked
+              ? "Canvas is locked by admin — read-only mode"
+              : "You are currently in Viewer mode"}
+          </span>
+          {!isAdmin && (
+            <button
+              onClick={handleSendPermissionRequest}
+              disabled={hasRequestedPermission}
+              className="bg-indigo-500/30 hover:bg-indigo-500/50 text-indigo-200 border border-indigo-500/40 text-[11px] px-2.5 py-1 rounded-full transition-colors font-bold disabled:opacity-50"
+            >
+              {hasRequestedPermission ? "Request Pending..." : "Ask for Permission"}
+            </button>
+          )}
+        </div>
+      )}
+
       {/* Floating Center-Top Toolbar */}
       <Topbar
         setSelectedTool={setSelectedTool}
         selectedTool={selectedTool}
         game={game}
+        canDraw={canDraw}
       />
 
       {/* Zoom Controls */}
@@ -156,8 +367,46 @@ export function Canvas({
         />
       </div>
 
-      {/* Left-Side Properties Panel (Animates in when a shape is selected) */}
-      {selectedShape && (
+      {/* Collaboration Panel (Top-Right) */}
+      <CollaborationPanel
+        roomId={roomId}
+        roomName={roomName || `Room #${roomId}`}
+        currentUserId={userId ?? ""}
+        isAdmin={isAdmin}
+        isLocked={isLocked}
+        members={presenceMembers}
+        cursorPositions={cursorPositions}
+        onFollowUser={handleFollowUser}
+        onKickUser={handleKickUser}
+        onToggleLock={handleToggleLock}
+        onSetRole={handleSetRole}
+        memberRoles={memberRoles}
+        pendingRequests={pendingRequests}
+        onGrantPermission={handleGrantPermission}
+        onDeclinePermission={handleDeclinePermission}
+        onSendPermissionRequest={handleSendPermissionRequest}
+        hasRequestedPermission={hasRequestedPermission}
+      />
+
+      {/* Command Palette */}
+      <CommandPalette
+        isOpen={isPaletteOpen}
+        onClose={() => setIsPaletteOpen(false)}
+        isAdmin={isAdmin}
+        isLocked={isLocked}
+        roomId={roomId}
+        onExportPNG={() => game?.exportAsPNG()}
+        onUndo={() => game?.undo()}
+        onRedo={() => game?.redo()}
+        onToggleLock={handleToggleLock}
+        onZoomIn={() => game?.zoomIn()}
+        onZoomOut={() => game?.zoomOut()}
+        onFitToScreen={() => game?.fitToScreen()}
+        onCreateRoom={handleCreateRoom}
+      />
+
+      {/* Left-Side Properties Panel (Animates in when a shape is selected, only when can draw) */}
+      {selectedShape && canDraw && (
         <div className="fixed left-4 top-20 w-72 max-h-[calc(100vh-6rem)] overflow-y-auto bg-zinc-900/95 backdrop-blur-2xl border border-white/10 rounded-2xl p-4 text-white shadow-2xl z-40 flex flex-col gap-4 animate-in fade-in slide-in-from-left-4 duration-200">
           {/* Header */}
           <div className="flex items-center justify-between border-b border-white/10 pb-2.5">
@@ -444,15 +693,17 @@ function Topbar({
   selectedTool,
   setSelectedTool,
   game,
+  canDraw,
 }: {
   selectedTool: Tool;
   setSelectedTool: (s: Tool) => void;
   game: Game | undefined;
+  canDraw: boolean;
 }) {
   return (
     <div className="fixed top-4 left-1/2 -translate-x-1/2 z-50 animate-in fade-in slide-in-from-top-4 duration-300">
       <div className="flex items-center gap-1 p-1.5 rounded-2xl bg-zinc-900/90 backdrop-blur-2xl border border-white/10 shadow-2xl shadow-black/80">
-        {/* Selection & Pan */}
+        {/* Selection & Pan — always available */}
         <IconButton
           onClick={() => setSelectedTool("select")}
           activated={selectedTool === "select"}
@@ -470,66 +721,74 @@ function Topbar({
 
         <div className="w-[1px] h-6 bg-white/10 mx-1" />
 
-        {/* Shapes */}
+        {/* Shapes — disabled when locked */}
         <IconButton
-          onClick={() => setSelectedTool("rect")}
+          onClick={() => canDraw && setSelectedTool("rect")}
           activated={selectedTool === "rect"}
           icon={<RectangleHorizontalIcon size={16} />}
           label="Rectangle"
           shortcut="R"
+          disabled={!canDraw}
         />
         <IconButton
-          onClick={() => setSelectedTool("diamond")}
+          onClick={() => canDraw && setSelectedTool("diamond")}
           activated={selectedTool === "diamond"}
           icon={<Diamond size={16} />}
           label="Diamond"
           shortcut="D"
+          disabled={!canDraw}
         />
         <IconButton
-          onClick={() => setSelectedTool("circle")}
+          onClick={() => canDraw && setSelectedTool("circle")}
           activated={selectedTool === "circle"}
           icon={<Circle size={16} />}
           label="Ellipse"
           shortcut="E"
+          disabled={!canDraw}
         />
         <IconButton
-          onClick={() => setSelectedTool("arrow")}
+          onClick={() => canDraw && setSelectedTool("arrow")}
           activated={selectedTool === "arrow"}
           icon={<ArrowRight size={16} />}
           label="Arrow"
           shortcut="A"
+          disabled={!canDraw}
         />
         <IconButton
-          onClick={() => setSelectedTool("line")}
+          onClick={() => canDraw && setSelectedTool("line")}
           activated={selectedTool === "line"}
           icon={<Minus size={16} />}
           label="Line"
           shortcut="L"
+          disabled={!canDraw}
         />
 
         <div className="w-[1px] h-6 bg-white/10 mx-1" />
 
         {/* Freehand, Text & Eraser */}
         <IconButton
-          onClick={() => setSelectedTool("pencil")}
+          onClick={() => canDraw && setSelectedTool("pencil")}
           activated={selectedTool === "pencil"}
           icon={<Pencil size={16} />}
           label="Pencil"
           shortcut="P"
+          disabled={!canDraw}
         />
         <IconButton
-          onClick={() => setSelectedTool("text")}
+          onClick={() => canDraw && setSelectedTool("text")}
           activated={selectedTool === "text"}
           icon={<Type size={16} />}
           label="Text"
           shortcut="T"
+          disabled={!canDraw}
         />
         <IconButton
-          onClick={() => setSelectedTool("eraser")}
+          onClick={() => canDraw && setSelectedTool("eraser")}
           activated={selectedTool === "eraser"}
           icon={<Eraser size={16} />}
           label="Eraser"
           shortcut="X"
+          disabled={!canDraw}
         />
 
         <div className="w-[1px] h-6 bg-white/10 mx-1" />

@@ -145,7 +145,7 @@ app.post("/signin", async (req, res) => {
       },
     );
 
-    res.json({ token });
+    res.json({ token, name: user.name });
   } catch (e) {
     res.status(500).json({
       message: "Internal server error",
@@ -205,6 +205,143 @@ app.get("/room/:slug", async (req, res) => {
     res.status(500).json({
       message: "Internal server error",
     });
+  }
+});
+
+// Get room details by numeric ID (for the canvas page)
+app.get("/room/by-id/:roomId", async (req, res) => {
+  const roomId = Number(req.params.roomId);
+  if (Number.isNaN(roomId)) {
+    res.status(400).json({ message: "Invalid room id" });
+    return;
+  }
+  try {
+    const room = await PrismaClient.room.findUnique({
+      where: { id: roomId },
+      select: { id: true, slug: true, adminId: true, isLocked: true },
+    });
+    if (!room) {
+      res.status(404).json({ message: "Room not found" });
+      return;
+    }
+    res.json({ room });
+  } catch (e) {
+    res.status(500).json({ message: "Internal server error" });
+  }
+});
+
+// Get all members of a room
+app.get("/room/:roomId/members", middleware, async (req, res) => {
+  const roomId = Number(req.params.roomId);
+  if (Number.isNaN(roomId)) {
+    res.status(400).json({ message: "Invalid room id" });
+    return;
+  }
+  try {
+    const members = await PrismaClient.roomMember.findMany({
+      where: { roomId },
+      include: {
+        user: { select: { id: true, name: true, email: true, photo: true } },
+      },
+      orderBy: { joinedAt: "asc" },
+    });
+    res.json({ members });
+  } catch (e) {
+    res.status(500).json({ message: "Internal server error" });
+  }
+});
+
+// Upsert a member's role (admin only)
+app.post("/room/:roomId/members", middleware, async (req, res) => {
+  const roomId = Number(req.params.roomId);
+  const requesterId = (req as any).userId;
+  const { userId, role } = req.body as { userId: string; role: string };
+
+  if (Number.isNaN(roomId) || !userId || !["editor", "viewer"].includes(role)) {
+    res.status(400).json({ message: "Invalid input" });
+    return;
+  }
+  try {
+    const room = await PrismaClient.room.findUnique({ where: { id: roomId }, select: { adminId: true } });
+    if (!room) {
+      res.status(404).json({ message: "Room not found" });
+      return;
+    }
+    if (room.adminId !== requesterId) {
+      res.status(403).json({ message: "Only admin can update member roles" });
+      return;
+    }
+    const member = await PrismaClient.roomMember.upsert({
+      where: { userId_roomId: { userId, roomId } },
+      update: { role },
+      create: { userId, roomId, role },
+    });
+    res.json({ member });
+  } catch (e) {
+    res.status(500).json({ message: "Internal server error" });
+  }
+});
+
+// Kick a member (admin only) — removes from RoomMember table
+app.delete("/room/:roomId/members/:userId", middleware, async (req, res) => {
+  const roomId = Number(req.params.roomId);
+  const targetUserId = Array.isArray(req.params.userId) ? req.params.userId[0]! : String(req.params.userId ?? "");
+  const requesterId = (req as any).userId;
+
+  if (Number.isNaN(roomId)) {
+    res.status(400).json({ message: "Invalid room id" });
+    return;
+  }
+  try {
+    const room = await PrismaClient.room.findUnique({ where: { id: roomId }, select: { adminId: true } });
+    if (!room) {
+      res.status(404).json({ message: "Room not found" });
+      return;
+    }
+    if (room.adminId !== requesterId) {
+      res.status(403).json({ message: "Only admin can kick members" });
+      return;
+    }
+    if (targetUserId === requesterId) {
+      res.status(400).json({ message: "Admin cannot kick themselves" });
+      return;
+    }
+    await PrismaClient.roomMember.deleteMany({
+      where: { userId: targetUserId, roomId },
+    });
+    res.json({ success: true });
+  } catch (e) {
+    res.status(500).json({ message: "Internal server error" });
+  }
+});
+
+// Toggle room lock (admin only)
+app.patch("/room/:roomId/lock", middleware, async (req, res) => {
+  const roomId = Number(req.params.roomId);
+  const requesterId = (req as any).userId;
+
+  if (Number.isNaN(roomId)) {
+    res.status(400).json({ message: "Invalid room id" });
+    return;
+  }
+  try {
+    const room = await PrismaClient.room.findUnique({ where: { id: roomId }, select: { adminId: true, isLocked: true } });
+    if (!room) {
+      res.status(404).json({ message: "Room not found" });
+      return;
+    }
+    if (room.adminId !== requesterId) {
+      res.status(403).json({ message: "Only admin can lock/unlock the room" });
+      return;
+    }
+    const updated = await PrismaClient.room.update({
+      where: { id: roomId },
+      data: { isLocked: !room.isLocked },
+      select: { isLocked: true },
+    });
+    res.json({ isLocked: updated.isLocked });
+  } catch (e) {
+    res.status(500).json({ message: "Internal server error" });
   }
 });
 

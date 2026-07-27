@@ -460,9 +460,28 @@ export class Game {
         return;
       }
       if (message.type === "chat") {
-        const parsedShape = JSON.parse(message.message);
-        if (parsedShape.shape) {
-          this.existingShapes.push(parsedShape.shape);
+        let parsedPayload: any = message.message;
+        if (typeof message.message === "string") {
+          try {
+            parsedPayload = JSON.parse(message.message);
+          } catch (_e) {
+            parsedPayload = null;
+          }
+        }
+        const incomingShape = parsedPayload?.shape || parsedPayload;
+        if (incomingShape && incomingShape.type) {
+          let existingIdx = -1;
+          if (incomingShape.seed !== undefined && incomingShape.seed !== null) {
+            existingIdx = this.existingShapes.findIndex((s) => s.seed === incomingShape.seed);
+          } else if (incomingShape.id !== undefined && incomingShape.id !== null) {
+            existingIdx = this.existingShapes.findIndex((s) => s.id === incomingShape.id);
+          }
+
+          if (existingIdx !== -1) {
+            this.existingShapes[existingIdx] = incomingShape;
+          } else {
+            this.existingShapes.push(incomingShape);
+          }
           this.pushHistory();
           this.clearCanvas();
         }
@@ -2234,6 +2253,20 @@ export class Game {
     link.download = filename;
     link.href = offscreen.toDataURL("image/png");
     link.click();
+  }
+
+  public getRemoteCursors(): Map<string, RemoteCursor> {
+    return this.remoteCursors;
+  }
+
+  public panToScreenPosition(screenX: number, screenY: number) {
+    const targetWorldX = (screenX - this.panX) / this.scale;
+    const targetWorldY = (screenY - this.panY) / this.scale;
+
+    this.panX = this.canvas.width / 2 - targetWorldX * this.scale;
+    this.panY = this.canvas.height / 2 - targetWorldY * this.scale;
+
+    this.clearCanvas();
   }
 
   initMouseHandlers() {

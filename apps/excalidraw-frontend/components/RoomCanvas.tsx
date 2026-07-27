@@ -1,10 +1,11 @@
 "use client";
 
+import { HTTP_BACKEND } from "@/config";
 import { WS_URL } from "@/config";
 import { useEffect, useState } from "react";
 import { Canvas } from "./Canvas";
 import { useRouter } from "next/navigation";
-import { PencilLine, Sparkles } from "lucide-react";
+import { PencilLine } from "lucide-react";
 
 /** Decode a JWT payload without verifying signature (client-side only) */
 function decodeJwt(token: string): Record<string, unknown> {
@@ -18,11 +19,20 @@ function decodeJwt(token: string): Record<string, unknown> {
   }
 }
 
+interface RoomInfo {
+  id: number;
+  slug: string;
+  adminId: string;
+  isLocked: boolean;
+}
+
 export function RoomCanvas({ roomId }: { roomId: string }) {
   const [socket, setSocket] = useState<WebSocket | null>(null);
   const [connectionError, setConnectionError] = useState("");
   const [userId, setUserId] = useState("");
   const [userName, setUserName] = useState("User");
+  const [roomInfo, setRoomInfo] = useState<RoomInfo | null>(null);
+  const [initialMemberRoles, setInitialMemberRoles] = useState<Record<string, "editor" | "viewer">>({});
   const router = useRouter();
 
   useEffect(() => {
@@ -49,6 +59,32 @@ export function RoomCanvas({ roomId }: { roomId: string }) {
       ? storedName.split("@")[0]!.replace(/[._-]/g, " ").replace(/\b\w/g, (c) => c.toUpperCase()).trim() || "User"
       : "User";
     setUserName(displayName);
+
+    // Fetch room info (slug, adminId, isLocked)
+    fetch(`${HTTP_BACKEND}/room/by-id/${roomId}`)
+      .then((r) => r.json())
+      .then((data) => {
+        if (data.room) setRoomInfo(data.room);
+      })
+      .catch(() => {
+        // non-fatal — canvas will still work without room info
+      });
+
+    // Fetch room member roles
+    fetch(`${HTTP_BACKEND}/room/${roomId}/members`, {
+      headers: { Authorization: `Bearer ${token}` },
+    })
+      .then((r) => r.json())
+      .then((data) => {
+        if (Array.isArray(data.members)) {
+          const roles: Record<string, "editor" | "viewer"> = {};
+          data.members.forEach((m: { userId: string; role: "editor" | "viewer" }) => {
+            roles[m.userId] = m.role;
+          });
+          setInitialMemberRoles(roles);
+        }
+      })
+      .catch(() => {});
 
     let activeSocket: WebSocket | null = null;
     let reconnectTimeoutId: NodeJS.Timeout | null = null;
@@ -79,6 +115,13 @@ export function RoomCanvas({ roomId }: { roomId: string }) {
           const data = JSON.parse(event.data);
           if (data.type === "error" && typeof data.message === "string") {
             setConnectionError(data.message);
+          }
+          // Update isLocked state from WS events
+          if (data.type === "room_locked") {
+            setRoomInfo((prev) => prev ? { ...prev, isLocked: true } : prev);
+          }
+          if (data.type === "room_unlocked") {
+            setRoomInfo((prev) => prev ? { ...prev, isLocked: false } : prev);
           }
         } catch (error) {
           console.error("Failed to parse websocket message:", error);
@@ -147,9 +190,22 @@ export function RoomCanvas({ roomId }: { roomId: string }) {
     );
   }
 
+  const isAdmin = !!roomInfo && roomInfo.adminId === userId;
+  const isLocked = roomInfo?.isLocked ?? false;
+  const roomName = roomInfo?.slug ?? `Room #${roomId}`;
+
   return (
     <div>
-      <Canvas roomId={roomId} socket={socket} userId={userId} userName={userName} />
+      <Canvas
+        roomId={roomId}
+        socket={socket}
+        userId={userId}
+        userName={userName}
+        isAdmin={isAdmin}
+        isLocked={isLocked}
+        roomName={roomName}
+        initialMemberRoles={initialMemberRoles}
+      />
     </div>
   );
 }
