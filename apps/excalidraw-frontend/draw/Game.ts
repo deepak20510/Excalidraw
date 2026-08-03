@@ -189,6 +189,17 @@ export class Game {
   private userId: string;
   private userName: string;
 
+  // High performance rAF render loop + RoughJS drawable caching
+  private isRenderRequested = false;
+  private animationFrameId: number | null = null;
+  private isDestroyed = false;
+  private roughGenerator: any = null;
+  private roughDrawableCache = new Map<string, any>();
+
+  // In-progress shape preview (drawn live during mouse drag)
+  private previewShape: Shape | null = null;
+  private previewPencilPoints: { x: number; y: number }[] = [];
+
   socket: WebSocket;
   public initPromise: Promise<void>;
 
@@ -196,6 +207,7 @@ export class Game {
     this.canvas = canvas;
     this.ctx = canvas.getContext("2d")!;
     this.roughCanvas = rough.canvas(canvas);
+    this.roughGenerator = rough.generator();
     this.existingShapes = [];
     this.roomId = roomId;
     this.socket = socket;
@@ -205,9 +217,32 @@ export class Game {
     this.initPromise = this.init();
     this.initHandlers();
     this.initMouseHandlers();
+    this.startRenderLoop();
+    this.requestRender();
+  }
+
+  public requestRender() {
+    this.isRenderRequested = true;
+  }
+
+  private startRenderLoop() {
+    const loop = () => {
+      if (this.isDestroyed) return;
+      if (this.isRenderRequested) {
+        this.isRenderRequested = false;
+        this.renderCanvas();
+      }
+      this.animationFrameId = requestAnimationFrame(loop);
+    };
+    this.animationFrameId = requestAnimationFrame(loop);
   }
 
   destroy() {
+    this.isDestroyed = true;
+    if (this.animationFrameId !== null) {
+      cancelAnimationFrame(this.animationFrameId);
+    }
+    this.roughDrawableCache.clear();
     this.canvas.removeEventListener("mousedown", this.mouseDownHandler);
     this.canvas.removeEventListener("mouseup", this.mouseUpHandler);
     this.canvas.removeEventListener("mousemove", this.mouseMoveHandler);
@@ -856,15 +891,19 @@ export class Game {
   }
 
   clearCanvas() {
+    this.requestRender();
+  }
+
+  renderCanvas() {
     // Reset transform to identity so clearRect covers the whole physical canvas
     this.ctx.setTransform(1, 0, 0, 1, 0, 0);
     this.ctx.clearRect(0, 0, this.canvas.width, this.canvas.height);
     this.ctx.fillStyle = "rgba(0, 0, 0)";
     this.ctx.fillRect(0, 0, this.canvas.width, this.canvas.height);
 
-    // Initialize or reuse the RoughJS canvas instance
-    const rc =
-      this.roughCanvas ?? (this.roughCanvas = rough.canvas(this.canvas));
+    // Initialize or reuse the RoughJS canvas & generator instances
+    const rc = this.roughCanvas ?? (this.roughCanvas = rough.canvas(this.canvas));
+    const generator = this.roughGenerator || (this.roughGenerator = rough.generator());
 
     // Apply pan + zoom transform for all shape drawing
     this.ctx.save();
@@ -900,14 +939,11 @@ export class Game {
         this.ctx.setLineDash([]);
       }
 
-      // Highlight selected shape with a blue outline (before applying stroke color)
-      if (index === this.selectedShapeIndex) {
-        this.ctx.strokeStyle = "rgba(59, 130, 246, 1)";
-        this.ctx.lineWidth = Math.max(2, style.strokeWidth + 1) / this.scale;
-      } else {
-        this.ctx.strokeStyle = style.strokeColor;
-        this.ctx.lineWidth = style.strokeWidth / this.scale;
-      }
+      // Always draw the shape with its actual stroke color.
+      // Selection is shown via the dashed bounding box drawn below.
+      const isSelected = index === this.selectedShapeIndex;
+      this.ctx.strokeStyle = style.strokeColor;
+      this.ctx.lineWidth = style.strokeWidth / this.scale;
 
       this.ctx.fillStyle = style.fillColor;
 
@@ -931,14 +967,8 @@ export class Game {
         seed: seedValue,
         roughness:
           style.roughness === 1 ? 1.5 : style.roughness === 2 ? 2.8 : 0,
-        stroke:
-          index === this.selectedShapeIndex
-            ? "rgba(59, 130, 246, 1)"
-            : style.strokeColor,
-        strokeWidth:
-          index === this.selectedShapeIndex
-            ? Math.max(2, style.strokeWidth + 1)
-            : style.strokeWidth,
+        stroke: style.strokeColor,
+        strokeWidth: style.strokeWidth,
         fill: style.fillColor === "transparent" ? undefined : style.fillColor,
         fillStyle: style.fillStyle || "solid",
         strokeLineDash,
@@ -946,15 +976,14 @@ export class Game {
 
       if (shape.type === "rect") {
         if (style.roughness > 0) {
-          rc.rectangle(
-            shape.x,
-            shape.y,
-            shape.width,
-            shape.height,
-            roughOptions,
-          );
+          const cacheKey = `rect_${seedValue}_${style.strokeColor}_${roughOptions.fill}_${roughOptions.strokeWidth}_${roughOptions.roughness}_${style.strokeStyle}_${style.fillStyle}_${shape.x}_${shape.y}_${shape.width}_${shape.height}`;
+          let drawable = this.roughDrawableCache.get(cacheKey);
+          if (!drawable) {
+            drawable = generator.rectangle(shape.x, shape.y, shape.width, shape.height, roughOptions);
+            this.roughDrawableCache.set(cacheKey, drawable);
+          }
+          rc.draw(drawable);
         } else {
-          // Draw fill first if not transparent
           if (style.fillColor !== "transparent") {
             this.ctx.fillRect(shape.x, shape.y, shape.width, shape.height);
           }
@@ -970,7 +999,13 @@ export class Game {
           [shape.x, cy],
         ];
         if (style.roughness > 0) {
-          rc.polygon(pts, roughOptions);
+          const cacheKey = `diamond_${seedValue}_${style.strokeColor}_${roughOptions.fill}_${roughOptions.strokeWidth}_${roughOptions.roughness}_${style.strokeStyle}_${style.fillStyle}_${shape.x}_${shape.y}_${shape.width}_${shape.height}`;
+          let drawable = this.roughDrawableCache.get(cacheKey);
+          if (!drawable) {
+            drawable = generator.polygon(pts, roughOptions);
+            this.roughDrawableCache.set(cacheKey, drawable);
+          }
+          rc.draw(drawable);
         } else {
           this.ctx.beginPath();
           this.ctx.moveTo(cx, shape.y);
@@ -986,9 +1021,14 @@ export class Game {
       } else if (shape.type === "circle") {
         if (style.roughness > 0) {
           const diameter = Math.abs(shape.radius) * 2;
-          rc.circle(shape.centerX, shape.centerY, diameter, roughOptions);
+          const cacheKey = `circle_${seedValue}_${style.strokeColor}_${roughOptions.fill}_${roughOptions.strokeWidth}_${roughOptions.roughness}_${style.strokeStyle}_${style.fillStyle}_${shape.centerX}_${shape.centerY}_${diameter}`;
+          let drawable = this.roughDrawableCache.get(cacheKey);
+          if (!drawable) {
+            drawable = generator.circle(shape.centerX, shape.centerY, diameter, roughOptions);
+            this.roughDrawableCache.set(cacheKey, drawable);
+          }
+          rc.draw(drawable);
         } else {
-          // Draw fill first if not transparent
           if (style.fillColor !== "transparent") {
             this.ctx.beginPath();
             this.ctx.arc(
@@ -1015,13 +1055,25 @@ export class Game {
       } else if (shape.type === "pencil") {
         if (style.roughness > 0 && shape.points.length >= 2) {
           const pts = shape.points.map((p) => [p.x, p.y] as [number, number]);
-          rc.curve(pts, roughOptions);
+          const cacheKey = `pencil_${seedValue}_${style.strokeColor}_${roughOptions.strokeWidth}_${roughOptions.roughness}_${shape.points.length}_${shape.points[0]?.x}_${shape.points[0]?.y}`;
+          let drawable = this.roughDrawableCache.get(cacheKey);
+          if (!drawable) {
+            drawable = generator.curve(pts, roughOptions);
+            this.roughDrawableCache.set(cacheKey, drawable);
+          }
+          rc.draw(drawable);
         } else {
           this.drawPencilShape(shape.points);
         }
       } else if (shape.type === "line") {
         if (style.roughness > 0) {
-          rc.line(shape.x1, shape.y1, shape.x2, shape.y2, roughOptions);
+          const cacheKey = `line_${seedValue}_${style.strokeColor}_${roughOptions.strokeWidth}_${roughOptions.roughness}_${shape.x1}_${shape.y1}_${shape.x2}_${shape.y2}`;
+          let drawable = this.roughDrawableCache.get(cacheKey);
+          if (!drawable) {
+            drawable = generator.line(shape.x1, shape.y1, shape.x2, shape.y2, roughOptions);
+            this.roughDrawableCache.set(cacheKey, drawable);
+          }
+          rc.draw(drawable);
         } else {
           this.ctx.beginPath();
           this.ctx.moveTo(shape.x1, shape.y1);
@@ -1030,16 +1082,26 @@ export class Game {
         }
       } else if (shape.type === "arrow") {
         if (style.roughness > 0) {
-          const headLength = 12 / this.scale;
-          const angle = Math.atan2(shape.y2 - shape.y1, shape.x2 - shape.x1);
-          const wing1X = shape.x2 - headLength * Math.cos(angle - Math.PI / 6);
-          const wing1Y = shape.y2 - headLength * Math.sin(angle - Math.PI / 6);
-          const wing2X = shape.x2 - headLength * Math.cos(angle + Math.PI / 6);
-          const wing2Y = shape.y2 - headLength * Math.sin(angle + Math.PI / 6);
-
-          rc.line(shape.x1, shape.y1, shape.x2, shape.y2, roughOptions);
-          rc.line(shape.x2, shape.y2, wing1X, wing1Y, roughOptions);
-          rc.line(shape.x2, shape.y2, wing2X, wing2Y, roughOptions);
+          const cacheKey = `arrow_${seedValue}_${style.strokeColor}_${roughOptions.strokeWidth}_${roughOptions.roughness}_${shape.x1}_${shape.y1}_${shape.x2}_${shape.y2}`;
+          let drawable = this.roughDrawableCache.get(cacheKey);
+          if (!drawable) {
+            const headLength = 12 / this.scale;
+            const angle = Math.atan2(shape.y2 - shape.y1, shape.x2 - shape.x1);
+            const wing1X = shape.x2 - headLength * Math.cos(angle - Math.PI / 6);
+            const wing1Y = shape.y2 - headLength * Math.sin(angle - Math.PI / 6);
+            const wing2X = shape.x2 - headLength * Math.cos(angle + Math.PI / 6);
+            const wing2Y = shape.y2 - headLength * Math.sin(angle + Math.PI / 6);
+            const l1 = generator.line(shape.x1, shape.y1, shape.x2, shape.y2, roughOptions);
+            const l2 = generator.line(shape.x2, shape.y2, wing1X, wing1Y, roughOptions);
+            const l3 = generator.line(shape.x2, shape.y2, wing2X, wing2Y, roughOptions);
+            drawable = [l1, l2, l3];
+            this.roughDrawableCache.set(cacheKey, drawable);
+          }
+          if (Array.isArray(drawable)) {
+            drawable.forEach((d) => rc.draw(d));
+          } else {
+            rc.draw(drawable);
+          }
         } else {
           this.ctx.beginPath();
           this.ctx.moveTo(shape.x1, shape.y1);
@@ -1048,10 +1110,7 @@ export class Game {
           this.drawArrowhead(shape.x1, shape.y1, shape.x2, shape.y2);
         }
       } else if (shape.type === "text") {
-        this.ctx.fillStyle =
-          index === this.selectedShapeIndex
-            ? "rgba(59, 130, 246, 1)"
-            : style.strokeColor;
+        this.ctx.fillStyle = style.strokeColor;
         this.ctx.font = "20px sans-serif";
         this.ctx.textBaseline = "alphabetic";
         this.ctx.fillText(shape.text, shape.x, shape.y);
@@ -1060,7 +1119,7 @@ export class Game {
       this.ctx.restore();
 
       // Draw selection bounding box
-      if (index === this.selectedShapeIndex) {
+      if (isSelected) {
         const bounds = this.getShapeBounds(shape);
         const padding = 4 / this.scale;
         this.ctx.save();
@@ -1081,6 +1140,77 @@ export class Game {
     this.ctx.lineWidth = 1;
 
     this.ctx.restore();
+
+    // Draw the live in-progress preview shape (if any)
+    if (this.previewShape || this.previewPencilPoints.length > 1) {
+      this.ctx.save();
+      this.ctx.setTransform(
+        this.scale,
+        0,
+        0,
+        this.scale,
+        -this.panX * this.scale,
+        -this.panY * this.scale,
+      );
+
+      const previewStyle = this.activeStyle;
+      this.ctx.strokeStyle = previewStyle.strokeColor;
+      this.ctx.lineWidth = previewStyle.strokeWidth / this.scale;
+      this.ctx.globalAlpha = previewStyle.opacity;
+      if (previewStyle.strokeStyle === "dashed") {
+        this.ctx.setLineDash([10 / this.scale, 5 / this.scale]);
+      } else if (previewStyle.strokeStyle === "dotted") {
+        this.ctx.setLineDash([2 / this.scale, 4 / this.scale]);
+      } else {
+        this.ctx.setLineDash([]);
+      }
+      this.ctx.fillStyle = previewStyle.fillColor;
+
+      const ps = this.previewShape;
+      if (ps?.type === "rect") {
+        if (previewStyle.fillColor !== "transparent") {
+          this.ctx.fillRect(ps.x, ps.y, ps.width, ps.height);
+        }
+        this.ctx.strokeRect(ps.x, ps.y, ps.width, ps.height);
+      } else if (ps?.type === "diamond") {
+        const cx = ps.x + ps.width / 2;
+        const cy = ps.y + ps.height / 2;
+        this.ctx.beginPath();
+        this.ctx.moveTo(cx, ps.y);
+        this.ctx.lineTo(ps.x + ps.width, cy);
+        this.ctx.lineTo(cx, ps.y + ps.height);
+        this.ctx.lineTo(ps.x, cy);
+        this.ctx.closePath();
+        if (previewStyle.fillColor !== "transparent") this.ctx.fill();
+        this.ctx.stroke();
+      } else if (ps?.type === "circle") {
+        if (previewStyle.fillColor !== "transparent") {
+          this.ctx.beginPath();
+          this.ctx.arc(ps.centerX, ps.centerY, Math.abs(ps.radius), 0, Math.PI * 2);
+          this.ctx.fill();
+          this.ctx.closePath();
+        }
+        this.ctx.beginPath();
+        this.ctx.arc(ps.centerX, ps.centerY, Math.abs(ps.radius), 0, Math.PI * 2);
+        this.ctx.stroke();
+        this.ctx.closePath();
+      } else if (ps?.type === "line") {
+        this.ctx.beginPath();
+        this.ctx.moveTo(ps.x1, ps.y1);
+        this.ctx.lineTo(ps.x2, ps.y2);
+        this.ctx.stroke();
+      } else if (ps?.type === "arrow") {
+        this.ctx.beginPath();
+        this.ctx.moveTo(ps.x1, ps.y1);
+        this.ctx.lineTo(ps.x2, ps.y2);
+        this.ctx.stroke();
+        this.drawArrowhead(ps.x1, ps.y1, ps.x2, ps.y2);
+      } else if (this.previewPencilPoints.length > 1) {
+        this.drawPencilShape(this.previewPencilPoints);
+      }
+
+      this.ctx.restore();
+    }
 
     // Draw the minimap after every canvas redraw
     this.drawMinimap();
@@ -1567,6 +1697,10 @@ export class Game {
     if (!this.clicked) return;
     this.clicked = false;
 
+    // Clear the live preview now that drawing is complete
+    this.previewShape = null;
+    this.previewPencilPoints = [];
+
     const rect = this.canvas.getBoundingClientRect();
     const screenX = e.clientX - rect.left;
     const screenY = e.clientY - rect.top;
@@ -1729,62 +1863,65 @@ export class Game {
 
     const selectedTool = this.selectedTool;
 
-    // Accumulate pencil points while drawing
+    // Update live preview state so renderCanvas() picks it up on next RAF tick
     if (selectedTool === "pencil") {
       this.currentPencilPoints.push({ x: currentX, y: currentY });
-    }
-
-    // Redraw existing shapes, then draw the in-progress preview
-    this.clearCanvas();
-
-    // Draw preview shape in world-space using the same transform
-    this.ctx.save();
-    this.ctx.setTransform(
-      this.scale,
-      0,
-      0,
-      this.scale,
-      -this.panX * this.scale,
-      -this.panY * this.scale,
-    );
-    this.ctx.strokeStyle = "rgba(255, 255, 255)";
-
-    if (selectedTool === "rect") {
-      this.ctx.strokeRect(this.startX, this.startY, width, height);
+      this.previewShape = null;
+      this.previewPencilPoints = [...this.currentPencilPoints];
+    } else if (selectedTool === "rect") {
+      this.previewPencilPoints = [];
+      this.previewShape = {
+        type: "rect",
+        x: this.startX,
+        y: this.startY,
+        width,
+        height,
+        style: { ...this.activeStyle },
+      };
     } else if (selectedTool === "diamond") {
-      const cx = this.startX + width / 2;
-      const cy = this.startY + height / 2;
-      this.ctx.beginPath();
-      this.ctx.moveTo(cx, this.startY);
-      this.ctx.lineTo(currentX, cy);
-      this.ctx.lineTo(cx, currentY);
-      this.ctx.lineTo(this.startX, cy);
-      this.ctx.closePath();
-      this.ctx.stroke();
+      this.previewPencilPoints = [];
+      this.previewShape = {
+        type: "diamond",
+        x: this.startX,
+        y: this.startY,
+        width,
+        height,
+        style: { ...this.activeStyle },
+      };
     } else if (selectedTool === "circle") {
       const radius = Math.max(Math.abs(width), Math.abs(height)) / 2;
-      const centerX = this.startX + (width > 0 ? radius : -radius);
-      const centerY = this.startY + (height > 0 ? radius : -radius);
-      this.ctx.beginPath();
-      this.ctx.arc(centerX, centerY, radius, 0, Math.PI * 2);
-      this.ctx.stroke();
-      this.ctx.closePath();
-    } else if (selectedTool === "pencil") {
-      this.drawPencilShape(this.currentPencilPoints);
+      this.previewPencilPoints = [];
+      this.previewShape = {
+        type: "circle",
+        radius,
+        centerX: this.startX + (width > 0 ? radius : -radius),
+        centerY: this.startY + (height > 0 ? radius : -radius),
+        style: { ...this.activeStyle },
+      };
     } else if (selectedTool === "line") {
-      this.ctx.beginPath();
-      this.ctx.moveTo(this.startX, this.startY);
-      this.ctx.lineTo(currentX, currentY);
-      this.ctx.stroke();
+      this.previewPencilPoints = [];
+      this.previewShape = {
+        type: "line",
+        x1: this.startX,
+        y1: this.startY,
+        x2: currentX,
+        y2: currentY,
+        style: { ...this.activeStyle },
+      };
     } else if (selectedTool === "arrow") {
-      this.ctx.beginPath();
-      this.ctx.moveTo(this.startX, this.startY);
-      this.ctx.lineTo(currentX, currentY);
-      this.ctx.stroke();
-      this.drawArrowhead(this.startX, this.startY, currentX, currentY);
+      this.previewPencilPoints = [];
+      this.previewShape = {
+        type: "arrow",
+        x1: this.startX,
+        y1: this.startY,
+        x2: currentX,
+        y2: currentY,
+        style: { ...this.activeStyle },
+      };
     }
 
-    this.ctx.restore();
+    // Request a render — the preview will be drawn inside renderCanvas()
+    this.requestRender();
   };
 
   createTextShapeAt = (clientX: number, clientY: number) => {

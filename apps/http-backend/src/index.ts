@@ -1,6 +1,7 @@
 import express from "express";
 import jwt from "jsonwebtoken";
 import bcrypt from "bcryptjs";
+import compression from "compression";
 import { JWT_SECRET } from "@repo/backend-common/config";
 import { middleware } from "./middleware";
 import {
@@ -13,6 +14,7 @@ import cors from "cors";
 import rateLimit from "express-rate-limit";
 
 const app = express();
+app.use(compression());
 app.use((req, _res, next) => {
   console.log(req.method, req.url, req.headers.origin);
   next();
@@ -48,10 +50,10 @@ if (process.env.NODE_ENV === "production" || process.env.TRUST_PROXY === "true")
   app.set("trust proxy", 1);
 }
 
-// Global rate limiting for the whole application
+// Global rate limiting for high-concurrency production usage
 const globalLimiter = rateLimit({
   windowMs: 15 * 60 * 1000, // 15 minutes
-  max: 100, // Limit each IP to 100 requests per 15 minutes
+  max: 1000, // Limit each IP to 1000 requests per 15 minutes for 100+ active users
   standardHeaders: true, // Return rate limit info in the `RateLimit-*` headers
   legacyHeaders: false, // Disable the `X-RateLimit-*` headers
   message: {

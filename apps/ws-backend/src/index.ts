@@ -1,12 +1,13 @@
 import { createServer } from "http";
 import { WebSocketServer, WebSocket } from "ws";
-import jwt, { JwtPayload } from "jsonwebtoken";
+import jwt from "jsonwebtoken";
 import { JWT_SECRET } from "@repo/backend-common/config";
 import { PrismaClient } from "@repo/db/client";
 
 const DEFAULT_PORT = 8082;
 const FALLBACK_PORT = 8083;
 const configuredPort = Number(process.env.WS_PORT ?? process.env.PORT ?? DEFAULT_PORT);
+
 const httpServer = createServer((req, res) => {
   if (req.url === "/health") {
     res.writeHead(200, { "Content-Type": "application/json" });
@@ -17,13 +18,13 @@ const httpServer = createServer((req, res) => {
   res.writeHead(404, { "Content-Type": "text/plain" });
   res.end("Not Found");
 });
+
 const wss = new WebSocketServer({ server: httpServer });
 
 // Keepalive heartbeat checks for idle connections
 const heartbeatInterval = setInterval(() => {
   wss.clients.forEach((ws) => {
     if ((ws as any).isAlive === false) {
-      console.log("Terminating unresponsive WS connection");
       return ws.terminate();
     }
     (ws as any).isAlive = false;
@@ -41,13 +42,24 @@ interface User {
   userId: string;
   name: string;
 }
+
 const users: User[] = [];
+// Fast O(1) set lookup for broadcasting per room
+const roomUsersMap = new Map<string, Set<User>>();
 
 // In-memory presence: roomId -> Map<userId, { name, userId }>
 const roomPresence = new Map<string, Map<string, { userId: string; name: string }>>();
 
 // Operational Transform / Conflict Resolution (Last-Write-Wins with timestamps)
 const roomShapeTimestamps = new Map<number, Map<string | number, number>>();
+
+// In-memory caches for high-throughput zero-latency operations
+const roomIdCache = new Map<string | number, { id: number; timestamp: number }>();
+const roomInfoCache = new Map<
+  number,
+  { adminId: string; isLocked: boolean; roles: Map<string, string>; fetchedAt: number }
+>();
+const userNameCache = new Map<string, string>();
 
 function getShapeKey(shape: any, fallbackIndex?: number): string | number {
   if (shape && shape.id !== undefined && shape.id !== null) {
@@ -91,44 +103,86 @@ function checkAndUpdateLWW(
 }
 
 async function resolveRoomId(roomIdOrSlug: unknown): Promise<number | null> {
-  if (roomIdOrSlug === undefined || roomIdOrSlug === null) {
-    return null;
+  if (roomIdOrSlug === undefined || roomIdOrSlug === null) return null;
+  const key = String(roomIdOrSlug).trim();
+  if (!key) return null;
+
+  const cached = roomIdCache.get(key);
+  if (cached && Date.now() - cached.timestamp < 300000) {
+    return cached.id;
   }
 
-  if (typeof roomIdOrSlug === "number" && Number.isInteger(roomIdOrSlug)) {
-    const room = await PrismaClient.room.findUnique({
-      where: { id: roomIdOrSlug },
-      select: { id: true },
-    });
-    return room?.id ?? null;
-  }
-
-  if (typeof roomIdOrSlug === "string") {
-    const trimmedValue = roomIdOrSlug.trim();
-    if (!trimmedValue) {
-      return null;
-    }
-
-    const numericRoomId = Number(trimmedValue);
-    if (Number.isInteger(numericRoomId)) {
+  const numericRoomId = Number(key);
+  if (Number.isInteger(numericRoomId)) {
+    try {
       const roomById = await PrismaClient.room.findUnique({
         where: { id: numericRoomId },
         select: { id: true },
       });
       if (roomById) {
+        roomIdCache.set(key, { id: roomById.id, timestamp: Date.now() });
+        roomIdCache.set(roomById.id, { id: roomById.id, timestamp: Date.now() });
         return roomById.id;
       }
-    }
-
-    // Fallback: check by slug
-    const roomBySlug = await PrismaClient.room.findUnique({
-      where: { slug: trimmedValue },
-      select: { id: true },
-    });
-    return roomBySlug?.id ?? null;
+    } catch (_e) {}
   }
 
+  try {
+    const roomBySlug = await PrismaClient.room.findUnique({
+      where: { slug: key },
+      select: { id: true },
+    });
+    if (roomBySlug) {
+      roomIdCache.set(key, { id: roomBySlug.id, timestamp: Date.now() });
+      return roomBySlug.id;
+    }
+  } catch (_e) {}
+
   return null;
+}
+
+async function getRoomInfo(
+  roomId: number
+): Promise<{ adminId: string; isLocked: boolean; roles: Map<string, string>; fetchedAt: number } | null> {
+  const cached = roomInfoCache.get(roomId);
+  const now = Date.now();
+  if (cached && now - cached.fetchedAt < 30000) {
+    return cached;
+  }
+  try {
+    const room = await PrismaClient.room.findUnique({
+      where: { id: roomId },
+      select: { adminId: true, isLocked: true },
+    });
+    if (!room) return null;
+
+    const members = await PrismaClient.roomMember.findMany({
+      where: { roomId },
+      select: { userId: true, role: true },
+    });
+    const rolesMap = new Map<string, string>();
+    members.forEach((m) => rolesMap.set(m.userId, m.role));
+    const info = { adminId: room.adminId, isLocked: room.isLocked, roles: rolesMap, fetchedAt: now };
+    roomInfoCache.set(roomId, info);
+    return info;
+  } catch (_e) {
+    return cached ?? null;
+  }
+}
+
+/** Check if a user has permission to draw in a room using fast in-memory checks */
+async function canUserDraw(roomId: number, userId: string): Promise<{ canDraw: boolean; reason?: string }> {
+  const info = await getRoomInfo(roomId);
+  if (!info) return { canDraw: false, reason: "Room not found" };
+  if (info.adminId === userId) return { canDraw: true };
+  if (info.isLocked) return { canDraw: false, reason: "Canvas is locked by admin." };
+
+  const role = info.roles.get(userId);
+  if (role === "viewer") {
+    return { canDraw: false, reason: "You are in viewer mode." };
+  }
+
+  return { canDraw: true };
 }
 
 function sendWsError(ws: WebSocket, message: string) {
@@ -137,7 +191,7 @@ function sendWsError(ws: WebSocket, message: string) {
       JSON.stringify({
         type: "error",
         message,
-      }),
+      })
     );
   }
 }
@@ -145,42 +199,12 @@ function sendWsError(ws: WebSocket, message: string) {
 function checkUser(token: string): string | null {
   try {
     const decode = jwt.verify(token, JWT_SECRET);
-
-    if (typeof decode == "string") {
-      return null;
-    }
-    if (!decode || !decode.userId) {
+    if (typeof decode === "string" || !decode || !decode.userId) {
       return null;
     }
     return decode.userId;
   } catch (e) {
     return null;
-  }
-}
-
-/** Check if a user has permission to draw in a room */
-async function canUserDraw(roomId: number, userId: string): Promise<{ canDraw: boolean; reason?: string }> {
-  try {
-    const room = await PrismaClient.room.findUnique({
-      where: { id: roomId },
-      select: { adminId: true, isLocked: true },
-    });
-    if (!room) return { canDraw: false, reason: "Room not found" };
-    if (room.adminId === userId) return { canDraw: true };
-
-    if (room.isLocked) return { canDraw: false, reason: "Canvas is locked by admin." };
-
-    const member = await PrismaClient.roomMember.findUnique({
-      where: { userId_roomId: { userId, roomId } },
-      select: { role: true },
-    });
-    if (member?.role === "viewer") {
-      return { canDraw: false, reason: "You are in viewer mode." };
-    }
-
-    return { canDraw: true };
-  } catch (_e) {
-    return { canDraw: true };
   }
 }
 
@@ -190,11 +214,46 @@ function broadcastPresence(roomIdStr: string) {
   if (!presence) return;
   const members = Array.from(presence.values());
   const msg = JSON.stringify({ type: "presence_update", roomId: roomIdStr, members });
-  users.forEach((u) => {
-    if (u.rooms.includes(roomIdStr) && u.ws.readyState === WebSocket.OPEN) {
-      u.ws.send(msg);
+  const roomUsers = roomUsersMap.get(roomIdStr);
+  if (roomUsers) {
+    roomUsers.forEach((u) => {
+      if (u.ws.readyState === WebSocket.OPEN) {
+        u.ws.send(msg);
+      }
+    });
+  }
+}
+
+// Background DB sync queue for shapes (debounced to eliminate DB bottlenecks during drag)
+const dbSyncDebounceTimers = new Map<number, NodeJS.Timeout>();
+
+function queueBulkShapeSave(roomId: number, userId: string, shapes: any[]) {
+  if (dbSyncDebounceTimers.has(roomId)) {
+    clearTimeout(dbSyncDebounceTimers.get(roomId)!);
+  }
+  const timer = setTimeout(async () => {
+    dbSyncDebounceTimers.delete(roomId);
+    try {
+      await PrismaClient.$transaction([
+        PrismaClient.shape.deleteMany({ where: { roomId } }),
+        PrismaClient.shape.createMany({
+          data: shapes.map((s: any) => {
+            const { type, style, ...data } = s || {};
+            return {
+              roomId,
+              userId,
+              type: type || "unknown",
+              data: data || {},
+              style: style || {},
+            };
+          }),
+        }),
+      ]);
+    } catch (err) {
+      console.error("Background shape save error:", err);
     }
-  });
+  }, 250);
+  dbSyncDebounceTimers.set(roomId, timer);
 }
 
 function startServer(port: number) {
@@ -209,7 +268,6 @@ function startServer(port: number) {
       startServer(nextPort);
       return;
     }
-
     throw error;
   });
 }
@@ -217,42 +275,42 @@ function startServer(port: number) {
 startServer(configuredPort);
 
 wss.on("connection", async function connection(ws, request) {
-  console.log("NEW WS CONNECTION");
   const url = request.url;
-  console.log("URL:", url);
-  if (!url) {
-    return;
-  }
+  if (!url) return;
+
   const queryParams = new URLSearchParams(url.split("?")[1]);
   const token = queryParams.get("token") || "";
-  console.log("TOKEN:", token);
   let userId = checkUser(token);
-  console.log("USER ID:", userId);
 
   if (!userId) {
     ws.close(1008, "Unauthorized: invalid or missing token.");
     return;
   }
 
-  // Fetch user name for presence
-  let userName = "User";
-  try {
-    const dbUser = await PrismaClient.user.findUnique({ where: { id: userId }, select: { name: true } });
-    if (dbUser?.name) userName = dbUser.name;
-  } catch (_e) {
-    // ignore – fallback to "User"
+  // Fast user name resolution
+  let userName = userNameCache.get(userId) || "User";
+  if (!userNameCache.has(userId)) {
+    try {
+      const dbUser = await PrismaClient.user.findUnique({ where: { id: userId }, select: { name: true } });
+      if (dbUser?.name) {
+        userName = dbUser.name;
+        userNameCache.set(userId, userName);
+      }
+    } catch (_e) {}
   }
 
   (ws as any).isAlive = true;
   ws.on("pong", () => {
     (ws as any).isAlive = true;
   });
-  users.push({
+
+  const userObj: User = {
     userId,
     name: userName,
     rooms: [],
     ws,
-  });
+  };
+  users.push(userObj);
 
   ws.on("message", async function message(data) {
     try {
@@ -272,31 +330,31 @@ wss.on("connection", async function connection(ws, request) {
           return;
         }
 
-        const user = users.find((x) => x.ws === ws);
-        if (user) {
-          const roomIdStr = String(resolvedRoomId);
-          if (!user.rooms.includes(roomIdStr)) {
-            user.rooms.push(roomIdStr);
-          }
-          // Add to presence map
-          if (!roomPresence.has(roomIdStr)) {
-            roomPresence.set(roomIdStr, new Map());
-          }
-          roomPresence.get(roomIdStr)!.set(userId!, { userId: userId!, name: user.name });
-          broadcastPresence(roomIdStr);
+        const roomIdStr = String(resolvedRoomId);
+        if (!userObj.rooms.includes(roomIdStr)) {
+          userObj.rooms.push(roomIdStr);
         }
+
+        if (!roomUsersMap.has(roomIdStr)) {
+          roomUsersMap.set(roomIdStr, new Set());
+        }
+        roomUsersMap.get(roomIdStr)!.add(userObj);
+
+        if (!roomPresence.has(roomIdStr)) {
+          roomPresence.set(roomIdStr, new Map());
+        }
+        roomPresence.get(roomIdStr)!.set(userId!, { userId: userId!, name: userObj.name });
+        broadcastPresence(roomIdStr);
         return;
       }
 
       // ── leave_room ─────────────────────────────────────────────────────────────
       if (parsedData.type === "leave_room") {
-        const user = users.find((x) => x.ws === ws);
-        if (!user) return;
         const resolvedRoomId = await resolveRoomId(parsedData.roomId);
         if (!resolvedRoomId) return;
         const roomIdStr = String(resolvedRoomId);
-        user.rooms = user.rooms.filter((x) => x !== roomIdStr);
-        // Remove from presence
+        userObj.rooms = userObj.rooms.filter((x) => x !== roomIdStr);
+        roomUsersMap.get(roomIdStr)?.delete(userObj);
         roomPresence.get(roomIdStr)?.delete(userId!);
         broadcastPresence(roomIdStr);
         return;
@@ -306,25 +364,22 @@ wss.on("connection", async function connection(ws, request) {
       if (parsedData.type === "cursor") {
         const senderRoomId = String(parsedData.roomId ?? "");
         if (senderRoomId) {
-          const sender = users.find((x) => x.ws === ws);
-          users.forEach((user) => {
-            if (
-              user.ws !== ws &&
-              user.rooms.includes(senderRoomId) &&
-              user.ws.readyState === WebSocket.OPEN
-            ) {
-              user.ws.send(
-                JSON.stringify({
-                  type: "cursor",
-                  userId: sender?.userId ?? parsedData.userId,
-                  name: parsedData.name,
-                  x: parsedData.x,
-                  y: parsedData.y,
-                  roomId: senderRoomId,
-                }),
-              );
-            }
-          });
+          const roomUsers = roomUsersMap.get(senderRoomId);
+          if (roomUsers && roomUsers.size > 0) {
+            const cursorPayload = JSON.stringify({
+              type: "cursor",
+              userId: userObj.userId,
+              name: parsedData.name || userObj.name,
+              x: parsedData.x,
+              y: parsedData.y,
+              roomId: senderRoomId,
+            });
+            roomUsers.forEach((u) => {
+              if (u.ws !== ws && u.ws.readyState === WebSocket.OPEN) {
+                u.ws.send(cursorPayload);
+              }
+            });
+          }
         }
         return;
       }
@@ -332,31 +387,27 @@ wss.on("connection", async function connection(ws, request) {
       // ── chat (new shape drawn) ─────────────────────────────────────────────────
       if (parsedData.type === "chat") {
         const roomId = await resolveRoomId(parsedData.roomId);
-        const message = parsedData.message;
+        const messagePayload = parsedData.message;
         if (!roomId) {
-          console.error("Invalid roomId:", parsedData.roomId);
           sendWsError(ws, "Invalid room id");
           return;
         }
 
-        // Check if user has draw permissions
         const check = await canUserDraw(roomId, userId!);
         if (!check.canDraw) {
           sendWsError(ws, check.reason || "You do not have permission to draw.");
           return;
         }
 
-        // Parse shape from message
         let parsedShape: any;
         try {
-          if (typeof message === "string") {
-            const parsed = JSON.parse(message);
+          if (typeof messagePayload === "string") {
+            const parsed = JSON.parse(messagePayload);
             parsedShape = parsed.shape ?? parsed;
-          } else if (message && typeof message === "object") {
-            parsedShape = (message as any).shape ?? message;
+          } else if (messagePayload && typeof messagePayload === "object") {
+            parsedShape = (messagePayload as any).shape ?? messagePayload;
           }
         } catch (err) {
-          console.error("Failed to parse shape message:", err);
           sendWsError(ws, "Invalid shape payload");
           return;
         }
@@ -367,30 +418,33 @@ wss.on("connection", async function connection(ws, request) {
           return;
         }
 
-        // Persist to DB
-        await PrismaClient.shape.create({
-          data: {
-            roomId,
-            userId: userId!,
-            type,
-            data: data || {},
-            style: style || {},
-          },
-        });
+        // Async DB save for shape
+        PrismaClient.shape
+          .create({
+            data: {
+              roomId,
+              userId: userId!,
+              type,
+              data: data || {},
+              style: style || {},
+            },
+          })
+          .catch((err) => console.error("Shape create error:", err));
 
-        // Broadcast to all OTHER users in this room
-        users.forEach((user) => {
-          if (user.ws === ws) return;
-          if (user.rooms.includes(String(roomId)) && user.ws.readyState === WebSocket.OPEN) {
-            user.ws.send(
-              JSON.stringify({
-                type: "chat",
-                message: message,
-                roomId,
-              }),
-            );
-          }
-        });
+        // Fast broadcast to room users
+        const roomUsers = roomUsersMap.get(String(roomId));
+        if (roomUsers) {
+          const chatMsg = JSON.stringify({
+            type: "chat",
+            message: messagePayload,
+            roomId,
+          });
+          roomUsers.forEach((u) => {
+            if (u.ws !== ws && u.ws.readyState === WebSocket.OPEN) {
+              u.ws.send(chatMsg);
+            }
+          });
+        }
         return;
       }
 
@@ -399,7 +453,6 @@ wss.on("connection", async function connection(ws, request) {
         const roomId = await resolveRoomId(parsedData.roomId);
         if (!roomId) return;
 
-        // Reject move if user cannot draw
         const check = await canUserDraw(roomId, userId!);
         if (!check.canDraw) {
           sendWsError(ws, check.reason || "Canvas is locked / view-only.");
@@ -411,11 +464,9 @@ wss.on("connection", async function connection(ws, request) {
         const shapeKey = getShapeKey(shape, shapeIndex);
         const incomingTimestamp = getShapeTimestamp(shape, parsedData.timestamp);
 
-        // OT / LWW Conflict Resolution check
         const { accepted } = checkAndUpdateLWW(roomId, shapeKey, incomingTimestamp);
 
         if (!accepted) {
-          console.log(`[OT/LWW] Conflict on shape ${shapeKey} in room ${roomId}. Rejecting stale move.`);
           const currentShapes = await PrismaClient.shape.findMany({
             where: { roomId },
             orderBy: { id: "asc" },
@@ -437,90 +488,51 @@ wss.on("connection", async function connection(ws, request) {
           return;
         }
 
-        // Persist updated shape list to DB
         if (Array.isArray(parsedData.shapes)) {
-          try {
-            await PrismaClient.$transaction([
-              PrismaClient.shape.deleteMany({ where: { roomId } }),
-              PrismaClient.shape.createMany({
-                data: parsedData.shapes.map((s: any) => {
-                  const { type, style, ...data } = s || {};
-                  return {
-                    roomId,
-                    userId: userId!,
-                    type: type || "unknown",
-                    data: data || {},
-                    style: style || {},
-                  };
-                }),
-              }),
-            ]);
-          } catch (err) {
-            console.error("Failed to sync shapes in DB:", err);
-          }
+          queueBulkShapeSave(roomId, userId!, parsedData.shapes);
         }
 
-        // Broadcast accepted move to other users in room
-        users.forEach((user) => {
-          if (
-            user.ws !== ws &&
-            user.rooms.includes(String(roomId)) &&
-            user.ws.readyState === WebSocket.OPEN
-          ) {
-            user.ws.send(
-              JSON.stringify({
-                ...parsedData,
-                shape: shape ? { ...shape, updatedAt: incomingTimestamp } : shape,
-                timestamp: incomingTimestamp,
-                roomId,
-              })
-            );
-          }
-        });
+        // Fast pre-serialized broadcast
+        const roomUsers = roomUsersMap.get(String(roomId));
+        if (roomUsers) {
+          const moveMsg = JSON.stringify({
+            ...parsedData,
+            shape: shape ? { ...shape, updatedAt: incomingTimestamp } : shape,
+            timestamp: incomingTimestamp,
+            roomId,
+          });
+          roomUsers.forEach((u) => {
+            if (u.ws !== ws && u.ws.readyState === WebSocket.OPEN) {
+              u.ws.send(moveMsg);
+            }
+          });
+        }
         return;
       }
 
-      // ── delete_shape / undo / redo ─────────────────────────────────────────────
+      // ── delete_shape / undo / redo / sync_shapes ──────────────────────────────
       if (
         parsedData.type === "delete_shape" ||
         parsedData.type === "undo" ||
-        parsedData.type === "redo"
+        parsedData.type === "redo" ||
+        parsedData.type === "sync_shapes"
       ) {
         const roomId = await resolveRoomId(parsedData.roomId);
         if (!roomId) return;
 
-        // Persist the full shape list to the database if provided
         if (Array.isArray(parsedData.shapes)) {
-          try {
-            await PrismaClient.$transaction([
-              PrismaClient.shape.deleteMany({ where: { roomId } }),
-              PrismaClient.shape.createMany({
-                data: parsedData.shapes.map((shape: any) => {
-                  const { type, style, ...data } = shape || {};
-                  return {
-                    roomId,
-                    userId: userId!,
-                    type: type || "unknown",
-                    data: data || {},
-                    style: style || {},
-                  };
-                }),
-              }),
-            ]);
-          } catch (err) {
-            console.error("Failed to sync shapes in DB:", err);
-          }
+          queueBulkShapeSave(roomId, userId!, parsedData.shapes);
         }
 
-        users.forEach((user) => {
-          if (
-            user.ws !== ws &&
-            user.rooms.includes(String(roomId)) &&
-            user.ws.readyState === WebSocket.OPEN
-          ) {
-            user.ws.send(JSON.stringify({ ...parsedData, roomId }));
-          }
-        });
+        const roomUsers = roomUsersMap.get(String(roomId));
+        if (roomUsers) {
+          const syncMsg = JSON.stringify({ ...parsedData, roomId });
+          roomUsers.forEach((u) => {
+            if (u.ws !== ws && u.ws.readyState === WebSocket.OPEN) {
+              u.ws.send(syncMsg);
+            }
+          });
+        }
         return;
       }
 
@@ -529,23 +541,22 @@ wss.on("connection", async function connection(ws, request) {
         const roomId = await resolveRoomId(parsedData.roomId);
         if (!roomId) return;
 
-        let isAdmin = false;
-        try {
-          const room = await PrismaClient.room.findUnique({ where: { id: roomId }, select: { adminId: true } });
-          isAdmin = room?.adminId === userId;
-        } catch (_e) {}
-
-        if (!isAdmin) {
+        const info = await getRoomInfo(roomId);
+        if (info?.adminId !== userId) {
           sendWsError(ws, "Only admin can kick users");
           return;
         }
 
         const targetUserId: string = parsedData.targetUserId;
-        const targetUser = users.find((u) => u.userId === targetUserId && u.rooms.includes(String(roomId)));
-        if (targetUser && targetUser.ws.readyState === WebSocket.OPEN) {
-          targetUser.ws.send(JSON.stringify({ type: "kicked", roomId }));
+        const roomUsers = roomUsersMap.get(String(roomId));
+        if (roomUsers) {
+          const kickMsg = JSON.stringify({ type: "kicked", roomId });
+          roomUsers.forEach((u) => {
+            if (u.userId === targetUserId && u.ws.readyState === WebSocket.OPEN) {
+              u.ws.send(kickMsg);
+            }
+          });
         }
-        // Remove from presence
         roomPresence.get(String(roomId))?.delete(targetUserId);
         broadcastPresence(String(roomId));
         return;
@@ -556,37 +567,35 @@ wss.on("connection", async function connection(ws, request) {
         const roomId = await resolveRoomId(parsedData.roomId);
         if (!roomId) return;
 
-        let isAdmin = false;
-        let currentLockState = false;
-        try {
-          const room = await PrismaClient.room.findUnique({
-            where: { id: roomId },
-            select: { adminId: true, isLocked: true },
-          });
-          isAdmin = room?.adminId === userId;
-          currentLockState = room?.isLocked ?? false;
-        } catch (_e) {}
-
-        if (!isAdmin) {
+        const info = await getRoomInfo(roomId);
+        if (info?.adminId !== userId) {
           sendWsError(ws, "Only admin can lock/unlock room");
           return;
         }
 
-        const newLockState = parsedData.isLocked !== undefined ? parsedData.isLocked : !currentLockState;
+        const newLockState = parsedData.isLocked !== undefined ? parsedData.isLocked : !info.isLocked;
 
         try {
           await PrismaClient.room.update({ where: { id: roomId }, data: { isLocked: newLockState } });
+          // Update in-memory room info cache
+          if (info) {
+            info.isLocked = newLockState;
+            info.fetchedAt = Date.now();
+          }
         } catch (_e) {
           sendWsError(ws, "Failed to update room lock state");
           return;
         }
 
         const lockMsg = JSON.stringify({ type: newLockState ? "room_locked" : "room_unlocked", roomId });
-        users.forEach((u) => {
-          if (u.rooms.includes(String(roomId)) && u.ws.readyState === WebSocket.OPEN) {
-            u.ws.send(lockMsg);
-          }
-        });
+        const roomUsers = roomUsersMap.get(String(roomId));
+        if (roomUsers) {
+          roomUsers.forEach((u) => {
+            if (u.ws.readyState === WebSocket.OPEN) {
+              u.ws.send(lockMsg);
+            }
+          });
+        }
         return;
       }
 
@@ -595,19 +604,14 @@ wss.on("connection", async function connection(ws, request) {
         const roomId = await resolveRoomId(parsedData.roomId);
         if (!roomId) return;
 
-        let isAdmin = false;
-        try {
-          const room = await PrismaClient.room.findUnique({ where: { id: roomId }, select: { adminId: true } });
-          isAdmin = room?.adminId === userId;
-        } catch (_e) {}
-
-        if (!isAdmin) {
+        const info = await getRoomInfo(roomId);
+        if (info?.adminId !== userId) {
           sendWsError(ws, "Only admin can set draw permissions");
           return;
         }
 
         const targetUserId: string = parsedData.targetUserId;
-        const role: string = parsedData.role; // "editor" | "viewer"
+        const role: string = parsedData.role;
 
         try {
           await PrismaClient.roomMember.upsert({
@@ -615,40 +619,42 @@ wss.on("connection", async function connection(ws, request) {
             update: { role },
             create: { userId: targetUserId, roomId, role },
           });
+          if (info) {
+            info.roles.set(targetUserId, role);
+            info.fetchedAt = Date.now();
+          }
         } catch (_e) {
           sendWsError(ws, "Failed to update member role");
           return;
         }
 
-        // Notify target user
-        const targetUser = users.find((u) => u.userId === targetUserId && u.rooms.includes(String(roomId)));
-        if (targetUser && targetUser.ws.readyState === WebSocket.OPEN) {
-          targetUser.ws.send(JSON.stringify({ type: "permission_update", role, roomId }));
+        const roomUsers = roomUsersMap.get(String(roomId));
+        if (roomUsers) {
+          const permMsg = JSON.stringify({ type: "permission_update", role, roomId });
+          roomUsers.forEach((u) => {
+            if (u.userId === targetUserId && u.ws.readyState === WebSocket.OPEN) {
+              u.ws.send(permMsg);
+            }
+          });
         }
 
-        // Broadcast updated presence to all room members
         broadcastPresence(String(roomId));
         return;
       }
-
     } catch (e) {
       console.error("Failed to process WebSocket message:", e);
     }
   });
 
   ws.on("close", () => {
-    const user = users.find((x) => x.ws === ws);
-    if (user) {
-      // Remove from all room presences on disconnect
-      user.rooms.forEach((roomIdStr) => {
-        roomPresence.get(roomIdStr)?.delete(userId!);
-        broadcastPresence(roomIdStr);
-      });
-    }
+    userObj.rooms.forEach((roomIdStr) => {
+      roomUsersMap.get(roomIdStr)?.delete(userObj);
+      roomPresence.get(roomIdStr)?.delete(userId!);
+      broadcastPresence(roomIdStr);
+    });
     const index = users.findIndex((x) => x.ws === ws);
     if (index !== -1) {
       users.splice(index, 1);
     }
-    console.log("WS CONNECTION CLOSED, REMOVED USER");
   });
 });
