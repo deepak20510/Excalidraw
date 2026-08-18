@@ -74,9 +74,17 @@ export function RoomCanvas({ roomId }: { roomId: string }) {
     fetch(`${HTTP_BACKEND}/room/${roomId}/members`, {
       headers: { Authorization: `Bearer ${token}` },
     })
-      .then((r) => r.json())
+      .then((r) => {
+        if (r.status === 403) {
+          localStorage.removeItem("token");
+          setConnectionError("Session expired. Please log in again.");
+          router.push("/signin");
+          return null;
+        }
+        return r.json();
+      })
       .then((data) => {
-        if (Array.isArray(data.members)) {
+        if (data && Array.isArray(data.members)) {
           const roles: Record<string, "editor" | "viewer"> = {};
           data.members.forEach((m: { userId: string; role: "editor" | "viewer" }) => {
             roles[m.userId] = m.role;
@@ -138,7 +146,10 @@ export function RoomCanvas({ roomId }: { roomId: string }) {
         setSocket(null);
 
         if (event.code === 1008) {
-          setConnectionError("Unauthorized connection. Please log in again.");
+          isCleanedUp = true;
+          if (reconnectTimeoutId) clearTimeout(reconnectTimeoutId);
+          setConnectionError("Unauthorized session. Please log in again.");
+          localStorage.removeItem("token");
           router.push("/signin");
           return;
         }
