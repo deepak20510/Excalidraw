@@ -49,7 +49,8 @@ export function IconButton({
       </button>
 
       {tooltipText && (
-        <div className="absolute bottom-full mb-2 hidden group-hover/tool:flex flex-col items-center pointer-events-none z-50 animate-in fade-in zoom-in-95 duration-150">
+        <div className="absolute top-full mt-2 hidden group-hover/tool:flex flex-col items-center pointer-events-none z-50 animate-in fade-in zoom-in-95 duration-150">
+          <div className="w-2 h-2 -mb-1 bg-zinc-900 border-l border-t border-white/10 transform rotate-45" />
           <div className="px-2.5 py-1 rounded-lg bg-zinc-900/95 border border-white/10 shadow-xl backdrop-blur-md text-[11px] font-medium text-zinc-200 whitespace-nowrap flex items-center gap-1.5">
             <span>{label || title}</span>
             {shortcut && (
@@ -58,7 +59,6 @@ export function IconButton({
               </kbd>
             )}
           </div>
-          <div className="w-2 h-2 -mt-1 bg-zinc-900 border-r border-b border-white/10 transform rotate-45" />
         </div>
       )}
     </div>
