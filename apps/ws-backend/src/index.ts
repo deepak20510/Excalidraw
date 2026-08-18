@@ -61,6 +61,34 @@ const roomInfoCache = new Map<
 >();
 const userNameCache = new Map<string, string>();
 
+// Periodic in-memory cache eviction for idle rooms (every 10 minutes)
+const cacheCleanupInterval = setInterval(() => {
+  const now = Date.now();
+  // Evict room info cache older than 1 hour or for inactive rooms
+  roomInfoCache.forEach((info, roomId) => {
+    const hasActiveUsers = (roomUsersMap.get(String(roomId))?.size ?? 0) > 0;
+    if (!hasActiveUsers && now - info.fetchedAt > 600000) {
+      roomInfoCache.delete(roomId);
+    }
+  });
+
+  // Evict LWW shape timestamps for rooms with no active users
+  roomShapeTimestamps.forEach((_map, roomId) => {
+    const hasActiveUsers = (roomUsersMap.get(String(roomId))?.size ?? 0) > 0;
+    if (!hasActiveUsers) {
+      roomShapeTimestamps.delete(roomId);
+    }
+  });
+
+  // Evict roomIdCache entries older than 10 minutes
+  roomIdCache.forEach((entry, key) => {
+    if (now - entry.timestamp > 600000) {
+      roomIdCache.delete(key);
+    }
+  });
+}, 600000);
+
+
 function getShapeKey(shape: any, fallbackIndex?: number): string | number {
   if (shape && shape.id !== undefined && shape.id !== null) {
     return `id_${shape.id}`;
@@ -239,12 +267,16 @@ function queueBulkShapeSave(roomId: number, userId: string, shapes: any[]) {
         PrismaClient.shape.createMany({
           data: shapes.map((s: any) => {
             const { type, style, ...data } = s || {};
+            const clientUpdatedAt = s && typeof s.updatedAt === "number" && !isNaN(s.updatedAt)
+              ? new Date(s.updatedAt)
+              : new Date();
             return {
               roomId,
               userId,
               type: type || "unknown",
               data: data || {},
               style: style || {},
+              updatedAt: clientUpdatedAt,
             };
           }),
         }),
@@ -520,6 +552,12 @@ wss.on("connection", async function connection(ws, request) {
         const roomId = await resolveRoomId(parsedData.roomId);
         if (!roomId) return;
 
+        const check = await canUserDraw(roomId, userId!);
+        if (!check.canDraw) {
+          sendWsError(ws, check.reason || "Canvas is locked / view-only.");
+          return;
+        }
+
         if (Array.isArray(parsedData.shapes)) {
           queueBulkShapeSave(roomId, userId!, parsedData.shapes);
         }
@@ -599,19 +637,20 @@ wss.on("connection", async function connection(ws, request) {
         return;
       }
 
-      // ── set_draw_permission (admin) ────────────────────────────────────────────
-      if (parsedData.type === "set_draw_permission") {
+      // ── set_draw_permission / set_role (admin) ─────────────────────────────────
+      if (parsedData.type === "set_draw_permission" || parsedData.type === "set_role") {
         const roomId = await resolveRoomId(parsedData.roomId);
         if (!roomId) return;
 
         const info = await getRoomInfo(roomId);
         if (info?.adminId !== userId) {
-          sendWsError(ws, "Only admin can set draw permissions");
+          sendWsError(ws, "Only admin can update draw permissions and roles");
           return;
         }
 
-        const targetUserId: string = parsedData.targetUserId;
+        const targetUserId: string = parsedData.targetUserId || parsedData.userId;
         const role: string = parsedData.role;
+        if (!targetUserId || !role) return;
 
         try {
           await PrismaClient.roomMember.upsert({
@@ -658,3 +697,19 @@ wss.on("connection", async function connection(ws, request) {
     }
   });
 });
+
+function handleWsShutdown(signal: string) {
+  console.log(`Received ${signal}, closing ws-backend...`);
+  clearInterval(heartbeatInterval);
+  clearInterval(cacheCleanupInterval);
+  wss.close(() => {
+    httpServer.close(() => {
+      console.log("ws-backend closed gracefully.");
+      process.exit(0);
+    });
+  });
+}
+
+process.on("SIGINT", () => handleWsShutdown("SIGINT"));
+process.on("SIGTERM", () => handleWsShutdown("SIGTERM"));
+

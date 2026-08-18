@@ -69,6 +69,25 @@ function isShape(value: unknown): value is Shape {
     );
   }
 
+  if (shape.type === "diamond") {
+    return (
+      typeof shape.x === "number" &&
+      typeof shape.y === "number" &&
+      typeof shape.width === "number" &&
+      typeof shape.height === "number"
+    );
+  }
+
+  if (shape.type === "image") {
+    return (
+      typeof shape.x === "number" &&
+      typeof shape.y === "number" &&
+      typeof shape.width === "number" &&
+      typeof shape.height === "number" &&
+      typeof shape.src === "string"
+    );
+  }
+
   return false;
 }
 

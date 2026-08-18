@@ -16,7 +16,9 @@ import rateLimit from "express-rate-limit";
 const app = express();
 app.use(compression());
 app.use((req, _res, next) => {
-  console.log(req.method, req.url, req.headers.origin);
+  if (process.env.NODE_ENV !== "production") {
+    console.log(req.method, req.url, req.headers.origin);
+  }
   next();
 });
 app.use(express.json());
@@ -406,4 +408,15 @@ app.get("/chats/:roomId", async (req, res) => {
   }
 });
 
-startServer(configuredPort);
+const server = startServer(configuredPort);
+
+function handleShutdown(signal: string) {
+  console.log(`Received ${signal}, closing http-backend...`);
+  server.close(() => {
+    console.log("http-backend closed gracefully.");
+    process.exit(0);
+  });
+}
+
+process.on("SIGINT", () => handleShutdown("SIGINT"));
+process.on("SIGTERM", () => handleShutdown("SIGTERM"));

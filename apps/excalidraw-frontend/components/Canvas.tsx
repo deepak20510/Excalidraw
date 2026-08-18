@@ -217,14 +217,24 @@ export function Canvas({
       }
     }
 
+    const sendJoinRoom = () => {
+      if (socket.readyState === WebSocket.OPEN) {
+        socket.send(JSON.stringify({ type: "join_room", roomId }));
+      }
+    };
+
     socket.addEventListener("message", handleMessage);
+    socket.addEventListener("open", sendJoinRoom);
 
     // Join room immediately after setting up listener to ensure initial presence_update is captured
     if (socket.readyState === WebSocket.OPEN) {
-      socket.send(JSON.stringify({ type: "join_room", roomId }));
+      sendJoinRoom();
     }
 
-    return () => socket.removeEventListener("message", handleMessage);
+    return () => {
+      socket.removeEventListener("message", handleMessage);
+      socket.removeEventListener("open", sendJoinRoom);
+    };
   }, [socket, roomId, userId, isAdmin, router]);
 
   // Global Ctrl+K listener for Command Palette

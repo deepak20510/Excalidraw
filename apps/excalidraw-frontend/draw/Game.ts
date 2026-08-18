@@ -200,6 +200,14 @@ export class Game {
   private roughGenerator: any = null;
   private roughDrawableCache = new Map<string, any>();
 
+  private setCachedDrawable(key: string, drawable: any) {
+    if (this.roughDrawableCache.size >= 500) {
+      const firstKey = this.roughDrawableCache.keys().next().value;
+      if (firstKey) this.roughDrawableCache.delete(firstKey);
+    }
+    this.roughDrawableCache.set(key, drawable);
+  }
+
   // In-progress shape preview (drawn live during mouse drag)
   private previewShape: Shape | null = null;
   private previewPencilPoints: { x: number; y: number }[] = [];
@@ -338,6 +346,8 @@ export class Game {
       this.canvas.style.cursor = "text";
     } else if (tool === "select") {
       this.canvas.style.cursor = "default";
+    } else if (tool === "eraser") {
+      this.canvas.style.cursor = "cell";
     } else {
       this.canvas.style.cursor = "crosshair";
     }
@@ -372,6 +382,11 @@ export class Game {
         };
       }),
     );
+    // Cap history at 100 entries to prevent memory from growing unbounded
+    const MAX_HISTORY = 100;
+    if (this.history.length > MAX_HISTORY) {
+      this.history = this.history.slice(this.history.length - MAX_HISTORY);
+    }
     this.historyPointer = this.history.length - 1;
   }
 
@@ -529,11 +544,30 @@ export class Game {
       } else if (message.type === "redo") {
         this.redo();
       } else if (message.type === "delete_shape") {
-        const index = message.shapeIndex as number;
-        if (index >= 0 && index < this.existingShapes.length) {
-          this.existingShapes.splice(index, 1);
-          this.selectedShapeIndex = null;
-          this.triggerSelectionCallback();
+        let targetIndex = -1;
+        if (message.shapeId !== undefined && message.shapeId !== null) {
+          targetIndex = this.existingShapes.findIndex((s) => s.id === message.shapeId);
+        }
+        if (targetIndex === -1 && message.shapeSeed !== undefined && message.shapeSeed !== null) {
+          targetIndex = this.existingShapes.findIndex((s) => s.seed === message.shapeSeed);
+        }
+        if (
+          targetIndex === -1 &&
+          typeof message.shapeIndex === "number" &&
+          message.shapeIndex >= 0 &&
+          message.shapeIndex < this.existingShapes.length
+        ) {
+          targetIndex = message.shapeIndex;
+        }
+
+        if (targetIndex !== -1) {
+          this.existingShapes.splice(targetIndex, 1);
+          if (this.selectedShapeIndex === targetIndex) {
+            this.selectedShapeIndex = null;
+            this.triggerSelectionCallback();
+          } else if (this.selectedShapeIndex !== null && this.selectedShapeIndex > targetIndex) {
+            this.selectedShapeIndex--;
+          }
           this.pushHistory();
           this.clearCanvas();
         }
@@ -626,7 +660,7 @@ export class Game {
       };
     } else if (shape.type === "text") {
       this.ctx.save();
-      this.ctx.font = "20px sans-serif";
+      this.ctx.font = "20px 'Inter', -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif";
       const metrics = this.ctx.measureText(shape.text);
       const textWidth = metrics.width;
       const textHeight = 20;
@@ -984,7 +1018,7 @@ export class Game {
           let drawable = this.roughDrawableCache.get(cacheKey);
           if (!drawable) {
             drawable = generator.rectangle(shape.x, shape.y, shape.width, shape.height, roughOptions);
-            this.roughDrawableCache.set(cacheKey, drawable);
+            this.setCachedDrawable(cacheKey, drawable);
           }
           rc.draw(drawable);
         } else {
@@ -1007,7 +1041,7 @@ export class Game {
           let drawable = this.roughDrawableCache.get(cacheKey);
           if (!drawable) {
             drawable = generator.polygon(pts, roughOptions);
-            this.roughDrawableCache.set(cacheKey, drawable);
+            this.setCachedDrawable(cacheKey, drawable);
           }
           rc.draw(drawable);
         } else {
@@ -1029,7 +1063,7 @@ export class Game {
           let drawable = this.roughDrawableCache.get(cacheKey);
           if (!drawable) {
             drawable = generator.circle(shape.centerX, shape.centerY, diameter, roughOptions);
-            this.roughDrawableCache.set(cacheKey, drawable);
+            this.setCachedDrawable(cacheKey, drawable);
           }
           rc.draw(drawable);
         } else {
@@ -1063,7 +1097,7 @@ export class Game {
           let drawable = this.roughDrawableCache.get(cacheKey);
           if (!drawable) {
             drawable = generator.curve(pts, roughOptions);
-            this.roughDrawableCache.set(cacheKey, drawable);
+            this.setCachedDrawable(cacheKey, drawable);
           }
           rc.draw(drawable);
         } else {
@@ -1075,7 +1109,7 @@ export class Game {
           let drawable = this.roughDrawableCache.get(cacheKey);
           if (!drawable) {
             drawable = generator.line(shape.x1, shape.y1, shape.x2, shape.y2, roughOptions);
-            this.roughDrawableCache.set(cacheKey, drawable);
+            this.setCachedDrawable(cacheKey, drawable);
           }
           rc.draw(drawable);
         } else {
@@ -1099,7 +1133,7 @@ export class Game {
             const l2 = generator.line(shape.x2, shape.y2, wing1X, wing1Y, roughOptions);
             const l3 = generator.line(shape.x2, shape.y2, wing2X, wing2Y, roughOptions);
             drawable = [l1, l2, l3];
-            this.roughDrawableCache.set(cacheKey, drawable);
+            this.setCachedDrawable(cacheKey, drawable);
           }
           if (Array.isArray(drawable)) {
             drawable.forEach((d) => rc.draw(d));
@@ -1456,10 +1490,13 @@ export class Game {
     ) {
       e.preventDefault();
       const index = this.selectedShapeIndex;
+      const deletedShape = this.existingShapes[index]!;
       this.existingShapes.splice(index, 1);
       this.socket.send(
         JSON.stringify({
           type: "delete_shape",
+          shapeId: deletedShape?.id,
+          shapeSeed: deletedShape?.seed,
           shapeIndex: index,
           shapes: this.existingShapes,
           roomId: this.roomId,
@@ -1595,11 +1632,14 @@ export class Game {
   private eraseShapeAt(worldX: number, worldY: number) {
     const hitIndex = this.findShapeAt(worldX, worldY);
     if (hitIndex !== null) {
+      const deletedShape = this.existingShapes[hitIndex]!;
       this.existingShapes.splice(hitIndex, 1);
       this.erasedDuringDrag = true;
       this.socket.send(
         JSON.stringify({
           type: "delete_shape",
+          shapeId: deletedShape?.id,
+          shapeSeed: deletedShape?.seed,
           shapeIndex: hitIndex,
           shapes: this.existingShapes,
           roomId: this.roomId,
@@ -1615,8 +1655,8 @@ export class Game {
     const screenX = e.clientX - rect.left;
     const screenY = e.clientY - rect.top;
 
-    // Middle mouse button (button === 1) or space held: start panning
-    if (e.button === 1 || this.spacePressed) {
+    // Middle mouse button (button === 1), space held, OR Hand (Pan) tool: start panning canvas
+    if (e.button === 1 || this.spacePressed || this.selectedTool === "hand") {
       this.isPanning = true;
       this.lastPanX = e.clientX;
       this.lastPanY = e.clientY;
@@ -1627,7 +1667,7 @@ export class Game {
 
     const world = this.screenToWorld(screenX, screenY);
 
-    // Select tool: hit-test for selection or start dragging
+    // Select tool: hit-test for selection or start dragging shapes
     if (this.selectedTool === "select") {
       const hitIndex = this.findShapeAt(world.x, world.y);
       if (hitIndex !== null) {
@@ -1639,11 +1679,12 @@ export class Game {
         const bounds = this.getShapeBounds(shape);
         this.dragOffsetX = world.x - bounds.minX;
         this.dragOffsetY = world.y - bounds.minY;
-        this.canvas.style.cursor = "move";
+        this.canvas.style.cursor = "grabbing";
       } else {
         this.selectedShapeIndex = null;
         this.triggerSelectionCallback();
         this.isDragging = false;
+        this.canvas.style.cursor = "default";
       }
       this.clearCanvas();
       return;
@@ -1687,14 +1728,14 @@ export class Game {
     // End panning
     if (this.isPanning) {
       this.isPanning = false;
-      this.canvas.style.cursor = this.spacePressed ? "grab" : "default";
+      this.canvas.style.cursor = (this.spacePressed || this.selectedTool === "hand") ? "grab" : "default";
       return;
     }
 
     // End dragging a selected shape
     if (this.isDragging) {
       this.isDragging = false;
-      this.canvas.style.cursor = "default";
+      this.canvas.style.cursor = this.selectedTool === "select" ? "grab" : "default";
       this.pushHistory();
       // Broadcast the moved shape with timestamp for LWW conflict resolution
       if (this.selectedShapeIndex !== null) {
@@ -1870,8 +1911,16 @@ export class Game {
       const dx = newMinX - bounds.minX;
       const dy = newMinY - bounds.minY;
       this.moveShape(shape, dx, dy);
+      this.canvas.style.cursor = "grabbing";
       this.clearCanvas();
       return;
+    }
+
+    // Dynamic hover cursor when using select tool over shapes
+    if (this.selectedTool === "select" && !this.isDragging) {
+      const world = this.screenToWorld(screenX, screenY);
+      const hit = this.findShapeAt(world.x, world.y);
+      this.canvas.style.cursor = hit !== null ? "grab" : "default";
     }
 
     // Eraser drag: erase any shape the cursor passes over
@@ -2438,6 +2487,9 @@ export class Game {
     this.canvas.addEventListener("mousedown", this.mouseDownHandler);
     this.canvas.addEventListener("mouseup", this.mouseUpHandler);
     this.canvas.addEventListener("mousemove", this.mouseMoveHandler);
+    // Capture mouseup on window so eraser drag is cancelled even if mouse is
+    // released outside the canvas bounds.
+    window.addEventListener("mouseup", this.mouseUpHandler);
     // passive: false is required so wheelHandler can call preventDefault()
     this.canvas.addEventListener("wheel", this.wheelHandler, {
       passive: false,
