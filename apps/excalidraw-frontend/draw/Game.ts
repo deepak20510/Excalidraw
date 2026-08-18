@@ -139,6 +139,10 @@ export class Game {
   private dragOffsetX = 0;
   private dragOffsetY = 0;
 
+  // Eraser drag state
+  private isErasing = false;
+  private erasedDuringDrag = false;
+
   // Active Style state (for new shapes), Selection callback, Zoom callback, and Tool callback
   public onSelectionChange?: (selectedShape: Shape | null) => void;
   public onZoomChange?: (scale: number) => void;
@@ -1587,7 +1591,26 @@ export class Game {
 
   // --- Mouse handlers ---
 
+  /** Delete the topmost shape at the given world coordinates (used by eraser). */
+  private eraseShapeAt(worldX: number, worldY: number) {
+    const hitIndex = this.findShapeAt(worldX, worldY);
+    if (hitIndex !== null) {
+      this.existingShapes.splice(hitIndex, 1);
+      this.erasedDuringDrag = true;
+      this.socket.send(
+        JSON.stringify({
+          type: "delete_shape",
+          shapeIndex: hitIndex,
+          shapes: this.existingShapes,
+          roomId: this.roomId,
+        }),
+      );
+      this.clearCanvas();
+    }
+  }
+
   mouseDownHandler = (e: MouseEvent) => {
+
     const rect = this.canvas.getBoundingClientRect();
     const screenX = e.clientX - rect.left;
     const screenY = e.clientY - rect.top;
@@ -1626,22 +1649,11 @@ export class Game {
       return;
     }
 
-    // Eraser tool: click on a shape to delete it
+    // Eraser tool: start erasing (works on click and drag)
     if (this.selectedTool === "eraser") {
-      const hitIndex = this.findShapeAt(world.x, world.y);
-      if (hitIndex !== null) {
-        this.existingShapes.splice(hitIndex, 1);
-        this.pushHistory();
-        this.socket.send(
-          JSON.stringify({
-            type: "delete_shape",
-            shapeIndex: hitIndex,
-            shapes: this.existingShapes,
-            roomId: this.roomId,
-          }),
-        );
-        this.clearCanvas();
-      }
+      this.isErasing = true;
+      this.erasedDuringDrag = false;
+      this.eraseShapeAt(world.x, world.y);
       return;
     }
 
@@ -1663,6 +1675,15 @@ export class Game {
   };
 
   mouseUpHandler = (e: MouseEvent) => {
+    // End erasing drag — push one history entry for the whole drag
+    if (this.isErasing) {
+      this.isErasing = false;
+      if (this.erasedDuringDrag) {
+        this.pushHistory();
+      }
+      return;
+    }
+
     // End panning
     if (this.isPanning) {
       this.isPanning = false;
@@ -1850,6 +1871,13 @@ export class Game {
       const dy = newMinY - bounds.minY;
       this.moveShape(shape, dx, dy);
       this.clearCanvas();
+      return;
+    }
+
+    // Eraser drag: erase any shape the cursor passes over
+    if (this.isErasing) {
+      const world = this.screenToWorld(screenX, screenY);
+      this.eraseShapeAt(world.x, world.y);
       return;
     }
 
