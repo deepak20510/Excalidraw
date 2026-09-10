@@ -381,6 +381,13 @@ app.get("/chats/:roomId", async (req, res) => {
       where: {
         roomId: roomId,
       },
+      select: {
+        id: true,
+        type: true,
+        data: true,
+        style: true,
+        updatedAt: true,
+      },
       orderBy: {
         id: "asc",
       },
@@ -398,6 +405,7 @@ app.get("/chats/:roomId", async (req, res) => {
       }),
     }));
 
+    res.setHeader("Cache-Control", "no-cache, no-store, must-revalidate");
     res.json({
       messages,
     });
@@ -408,10 +416,23 @@ app.get("/chats/:roomId", async (req, res) => {
   }
 });
 
+// Optional Keep-Alive Ping for free-tier deployments (e.g. Render/Koyeb)
+const keepAliveUrl = process.env.KEEP_ALIVE_URL;
+let keepAliveTimer: NodeJS.Timeout | null = null;
+if (keepAliveUrl) {
+  console.log(`Keep-alive monitor initialized for ${keepAliveUrl}`);
+  keepAliveTimer = setInterval(() => {
+    fetch(`${keepAliveUrl}/health`)
+      .then((r) => r.json())
+      .catch((err) => console.warn("Keep-alive ping error:", err?.message || err));
+  }, 10 * 60 * 1000); // every 10 minutes
+}
+
 const server = startServer(configuredPort);
 
 function handleShutdown(signal: string) {
   console.log(`Received ${signal}, closing http-backend...`);
+  if (keepAliveTimer) clearInterval(keepAliveTimer);
   server.close(() => {
     console.log("http-backend closed gracefully.");
     process.exit(0);
@@ -420,3 +441,4 @@ function handleShutdown(signal: string) {
 
 process.on("SIGINT", () => handleShutdown("SIGINT"));
 process.on("SIGTERM", () => handleShutdown("SIGTERM"));
+

@@ -2,10 +2,12 @@
 
 import { HTTP_BACKEND } from "@/config";
 import { WS_URL } from "@/config";
-import { useEffect, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import { Canvas } from "./Canvas";
 import { useRouter } from "next/navigation";
 import { PencilLine } from "lucide-react";
+import { getExistingShapes } from "@/draw/http";
+import type { Shape } from "@/draw/Game";
 
 /** Decode a JWT payload without verifying signature (client-side only) */
 function decodeJwt(token: string): Record<string, unknown> {
@@ -33,6 +35,7 @@ export function RoomCanvas({ roomId }: { roomId: string }) {
   const [userName, setUserName] = useState("User");
   const [roomInfo, setRoomInfo] = useState<RoomInfo | null>(null);
   const [initialMemberRoles, setInitialMemberRoles] = useState<Record<string, "editor" | "viewer">>({});
+  const initialShapesPromiseRef = useRef<Promise<Shape[]> | null>(null);
   const router = useRouter();
 
   useEffect(() => {
@@ -41,6 +44,9 @@ export function RoomCanvas({ roomId }: { roomId: string }) {
       setConnectionError("Invalid room id. Please rejoin the room from the home page.");
       return;
     }
+
+    // Immediately trigger shapes prefetch in parallel with WS & metadata
+    initialShapesPromiseRef.current = getExistingShapes(roomId);
 
     const token = localStorage.getItem("token");
     if (!token) {
@@ -60,7 +66,7 @@ export function RoomCanvas({ roomId }: { roomId: string }) {
       : "User";
     setUserName(displayName);
 
-    // Fetch room info (slug, adminId, isLocked)
+    // Fetch room info (slug, adminId, isLocked) in parallel
     fetch(`${HTTP_BACKEND}/room/by-id/${roomId}`)
       .then((r) => r.json())
       .then((data) => {
@@ -70,7 +76,7 @@ export function RoomCanvas({ roomId }: { roomId: string }) {
         // non-fatal — canvas will still work without room info
       });
 
-    // Fetch room member roles
+    // Fetch room member roles in parallel
     fetch(`${HTTP_BACKEND}/room/${roomId}/members`, {
       headers: { Authorization: `Bearer ${token}` },
     })
@@ -216,6 +222,7 @@ export function RoomCanvas({ roomId }: { roomId: string }) {
         isLocked={isLocked}
         roomName={roomName}
         initialMemberRoles={initialMemberRoles}
+        initialShapes={initialShapesPromiseRef.current || undefined}
       />
     </div>
   );

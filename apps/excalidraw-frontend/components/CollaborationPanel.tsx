@@ -1,6 +1,6 @@
 "use client";
 
-import { useEffect, useRef, useState } from "react";
+import { memo, useEffect, useRef, useState } from "react";
 import {
   Users,
   Crown,
@@ -66,7 +66,7 @@ function getInitials(name: string): string {
     .slice(0, 2);
 }
 
-export function CollaborationPanel({
+export const CollaborationPanel = memo(function CollaborationPanel({
   roomId,
   roomName,
   currentUserId,
@@ -360,4 +360,4 @@ export function CollaborationPanel({
       </div>
     </div>
   );
-}
+});

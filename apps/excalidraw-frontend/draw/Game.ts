@@ -173,6 +173,7 @@ export class Game {
   private minimapCanvas: HTMLCanvasElement | null = null;
   private minimapCtx: CanvasRenderingContext2D | null = null;
   private isDraggingMinimap = false;
+  private lastMinimapDraw = 0;
 
   // Touch tracking state
   private lastTouchX = 0;
@@ -215,9 +216,16 @@ export class Game {
   socket: WebSocket;
   public initPromise: Promise<void>;
 
-  constructor(canvas: HTMLCanvasElement, roomId: string, socket: WebSocket, userId = "", userName = "User") {
+  constructor(
+    canvas: HTMLCanvasElement,
+    roomId: string,
+    socket: WebSocket,
+    userId = "",
+    userName = "User",
+    initialShapes?: Shape[] | Promise<Shape[]>,
+  ) {
     this.canvas = canvas;
-    this.ctx = canvas.getContext("2d")!;
+    this.ctx = (canvas.getContext("2d", { alpha: false, desynchronized: true }) || canvas.getContext("2d"))!;
     this.roughCanvas = rough.canvas(canvas);
     this.roughGenerator = rough.generator();
     this.existingShapes = [];
@@ -226,7 +234,31 @@ export class Game {
     this.userId = userId;
     this.userName = userName;
     this.clicked = false;
-    this.initPromise = this.init();
+    this.updateCanvasRect();
+
+    if (Array.isArray(initialShapes)) {
+      this.existingShapes = [...initialShapes];
+      this.pushHistory();
+      this.initPromise = Promise.resolve();
+    } else if (initialShapes && typeof (initialShapes as Promise<Shape[]>).then === "function") {
+      this.initPromise = (async () => {
+        try {
+          const shapes = await initialShapes;
+          if (Array.isArray(shapes) && shapes.length > 0) {
+            this.existingShapes = shapes;
+            this.pushHistory();
+            this.clearCanvas();
+          } else {
+            await this.init();
+          }
+        } catch (_e) {
+          await this.init();
+        }
+      })();
+    } else {
+      this.initPromise = this.init();
+    }
+
     this.initHandlers();
     this.initMouseHandlers();
     this.startRenderLoop();
@@ -258,6 +290,7 @@ export class Game {
     this.canvas.removeEventListener("mousedown", this.mouseDownHandler);
     this.canvas.removeEventListener("mouseup", this.mouseUpHandler);
     this.canvas.removeEventListener("mousemove", this.mouseMoveHandler);
+    window.removeEventListener("mouseup", this.mouseUpHandler);
     this.canvas.removeEventListener("wheel", this.wheelHandler);
     this.canvas.removeEventListener("touchstart", this.touchStartHandler);
     this.canvas.removeEventListener("touchmove", this.touchMoveHandler);
@@ -619,7 +652,22 @@ export class Game {
   };
 
   initHandlers() {
-    this.socket.addEventListener("message", this.messageListener);
+    if (this.socket) {
+      this.socket.addEventListener("message", this.messageListener);
+    }
+  }
+
+  public updateSocket(newSocket: WebSocket) {
+    if (this.socket === newSocket) return;
+    if (this.socket) {
+      try {
+        this.socket.removeEventListener("message", this.messageListener);
+      } catch (_e) {}
+    }
+    this.socket = newSocket;
+    if (this.socket) {
+      this.socket.addEventListener("message", this.messageListener);
+    }
   }
 
   /** Convert screen (pixel) coordinates to world coordinates */
@@ -800,6 +848,9 @@ export class Game {
   private drawPencilShape(points: { x: number; y: number }[]) {
     if (points.length < 2) return;
 
+    this.ctx.save();
+    this.ctx.lineCap = "round";
+    this.ctx.lineJoin = "round";
     this.ctx.beginPath();
     this.ctx.moveTo(points[0]!.x, points[0]!.y);
 
@@ -819,6 +870,7 @@ export class Game {
     }
 
     this.ctx.stroke();
+    this.ctx.restore();
   }
 
   /** Draw an arrowhead at (tipX, tipY) pointing from (fromX, fromY) */
@@ -933,11 +985,16 @@ export class Game {
   }
 
   renderCanvas() {
-    // Reset transform to identity so clearRect covers the whole physical canvas
+    // Reset transform to identity so fillRect covers the whole physical canvas
     this.ctx.setTransform(1, 0, 0, 1, 0, 0);
-    this.ctx.clearRect(0, 0, this.canvas.width, this.canvas.height);
-    this.ctx.fillStyle = "rgba(0, 0, 0)";
+    this.ctx.fillStyle = "#09090b";
     this.ctx.fillRect(0, 0, this.canvas.width, this.canvas.height);
+
+    // Global smoothing & rendering quality
+    this.ctx.imageSmoothingEnabled = true;
+    this.ctx.imageSmoothingQuality = "high";
+    this.ctx.lineCap = "round";
+    this.ctx.lineJoin = "round";
 
     // Initialize or reuse the RoughJS canvas & generator instances
     const rc = this.roughCanvas ?? (this.roughCanvas = rough.canvas(this.canvas));
@@ -954,7 +1011,23 @@ export class Game {
       -this.panY * this.scale,
     );
 
+    // Viewport bounds in world coordinates (with margin)
+    const vpLeft = this.panX - 50;
+    const vpTop = this.panY - 50;
+    const vpRight = this.panX + this.canvas.width / this.scale + 50;
+    const vpBottom = this.panY + this.canvas.height / this.scale + 50;
+
     this.existingShapes.forEach((shape, index) => {
+      const bounds = this.getShapeBounds(shape);
+      if (
+        bounds.maxX < vpLeft ||
+        bounds.minX > vpRight ||
+        bounds.maxY < vpTop ||
+        bounds.minY > vpBottom
+      ) {
+        return;
+      }
+
       // Default styles if shape has no style properties
       const style = shape.style || {
         strokeColor: "#ffffff",
@@ -1014,13 +1087,16 @@ export class Game {
 
       if (shape.type === "rect") {
         if (style.roughness > 0) {
-          const cacheKey = `rect_${seedValue}_${style.strokeColor}_${roughOptions.fill}_${roughOptions.strokeWidth}_${roughOptions.roughness}_${style.strokeStyle}_${style.fillStyle}_${shape.x}_${shape.y}_${shape.width}_${shape.height}`;
+          const cacheKey = `rect_${seedValue}_${style.strokeColor}_${roughOptions.fill}_${roughOptions.strokeWidth}_${roughOptions.roughness}_${style.strokeStyle}_${style.fillStyle}_${shape.width}_${shape.height}`;
           let drawable = this.roughDrawableCache.get(cacheKey);
           if (!drawable) {
-            drawable = generator.rectangle(shape.x, shape.y, shape.width, shape.height, roughOptions);
+            drawable = generator.rectangle(0, 0, shape.width, shape.height, roughOptions);
             this.setCachedDrawable(cacheKey, drawable);
           }
+          this.ctx.save();
+          this.ctx.translate(shape.x, shape.y);
           rc.draw(drawable);
+          this.ctx.restore();
         } else {
           if (style.fillColor !== "transparent") {
             this.ctx.fillRect(shape.x, shape.y, shape.width, shape.height);
@@ -1028,28 +1104,35 @@ export class Game {
           this.ctx.strokeRect(shape.x, shape.y, shape.width, shape.height);
         }
       } else if (shape.type === "diamond") {
-        const cx = shape.x + shape.width / 2;
-        const cy = shape.y + shape.height / 2;
-        const pts: [number, number][] = [
-          [cx, shape.y],
-          [shape.x + shape.width, cy],
-          [cx, shape.y + shape.height],
-          [shape.x, cy],
-        ];
+        const w = shape.width;
+        const h = shape.height;
+        const cx = w / 2;
+        const cy = h / 2;
         if (style.roughness > 0) {
-          const cacheKey = `diamond_${seedValue}_${style.strokeColor}_${roughOptions.fill}_${roughOptions.strokeWidth}_${roughOptions.roughness}_${style.strokeStyle}_${style.fillStyle}_${shape.x}_${shape.y}_${shape.width}_${shape.height}`;
+          const cacheKey = `diamond_${seedValue}_${style.strokeColor}_${roughOptions.fill}_${roughOptions.strokeWidth}_${roughOptions.roughness}_${style.strokeStyle}_${style.fillStyle}_${w}_${h}`;
           let drawable = this.roughDrawableCache.get(cacheKey);
           if (!drawable) {
+            const pts: [number, number][] = [
+              [cx, 0],
+              [w, cy],
+              [cx, h],
+              [0, cy],
+            ];
             drawable = generator.polygon(pts, roughOptions);
             this.setCachedDrawable(cacheKey, drawable);
           }
+          this.ctx.save();
+          this.ctx.translate(shape.x, shape.y);
           rc.draw(drawable);
+          this.ctx.restore();
         } else {
+          const wx = shape.x;
+          const wy = shape.y;
           this.ctx.beginPath();
-          this.ctx.moveTo(cx, shape.y);
-          this.ctx.lineTo(shape.x + shape.width, cy);
-          this.ctx.lineTo(cx, shape.y + shape.height);
-          this.ctx.lineTo(shape.x, cy);
+          this.ctx.moveTo(wx + cx, wy);
+          this.ctx.lineTo(wx + w, wy + cy);
+          this.ctx.lineTo(wx + cx, wy + h);
+          this.ctx.lineTo(wx, wy + cy);
           this.ctx.closePath();
           if (style.fillColor !== "transparent") {
             this.ctx.fill();
@@ -1057,15 +1140,18 @@ export class Game {
           this.ctx.stroke();
         }
       } else if (shape.type === "circle") {
+        const diameter = Math.abs(shape.radius) * 2;
         if (style.roughness > 0) {
-          const diameter = Math.abs(shape.radius) * 2;
-          const cacheKey = `circle_${seedValue}_${style.strokeColor}_${roughOptions.fill}_${roughOptions.strokeWidth}_${roughOptions.roughness}_${style.strokeStyle}_${style.fillStyle}_${shape.centerX}_${shape.centerY}_${diameter}`;
+          const cacheKey = `circle_${seedValue}_${style.strokeColor}_${roughOptions.fill}_${roughOptions.strokeWidth}_${roughOptions.roughness}_${style.strokeStyle}_${style.fillStyle}_${diameter}`;
           let drawable = this.roughDrawableCache.get(cacheKey);
           if (!drawable) {
-            drawable = generator.circle(shape.centerX, shape.centerY, diameter, roughOptions);
+            drawable = generator.circle(0, 0, diameter, roughOptions);
             this.setCachedDrawable(cacheKey, drawable);
           }
+          this.ctx.save();
+          this.ctx.translate(shape.centerX, shape.centerY);
           rc.draw(drawable);
+          this.ctx.restore();
         } else {
           if (style.fillColor !== "transparent") {
             this.ctx.beginPath();
@@ -1104,14 +1190,19 @@ export class Game {
           this.drawPencilShape(shape.points);
         }
       } else if (shape.type === "line") {
+        const dx = shape.x2 - shape.x1;
+        const dy = shape.y2 - shape.y1;
         if (style.roughness > 0) {
-          const cacheKey = `line_${seedValue}_${style.strokeColor}_${roughOptions.strokeWidth}_${roughOptions.roughness}_${shape.x1}_${shape.y1}_${shape.x2}_${shape.y2}`;
+          const cacheKey = `line_${seedValue}_${style.strokeColor}_${roughOptions.strokeWidth}_${roughOptions.roughness}_${dx}_${dy}`;
           let drawable = this.roughDrawableCache.get(cacheKey);
           if (!drawable) {
-            drawable = generator.line(shape.x1, shape.y1, shape.x2, shape.y2, roughOptions);
+            drawable = generator.line(0, 0, dx, dy, roughOptions);
             this.setCachedDrawable(cacheKey, drawable);
           }
+          this.ctx.save();
+          this.ctx.translate(shape.x1, shape.y1);
           rc.draw(drawable);
+          this.ctx.restore();
         } else {
           this.ctx.beginPath();
           this.ctx.moveTo(shape.x1, shape.y1);
@@ -1119,27 +1210,32 @@ export class Game {
           this.ctx.stroke();
         }
       } else if (shape.type === "arrow") {
+        const dx = shape.x2 - shape.x1;
+        const dy = shape.y2 - shape.y1;
         if (style.roughness > 0) {
-          const cacheKey = `arrow_${seedValue}_${style.strokeColor}_${roughOptions.strokeWidth}_${roughOptions.roughness}_${shape.x1}_${shape.y1}_${shape.x2}_${shape.y2}`;
+          const cacheKey = `arrow_${seedValue}_${style.strokeColor}_${roughOptions.strokeWidth}_${roughOptions.roughness}_${dx}_${dy}`;
           let drawable = this.roughDrawableCache.get(cacheKey);
           if (!drawable) {
             const headLength = 12 / this.scale;
-            const angle = Math.atan2(shape.y2 - shape.y1, shape.x2 - shape.x1);
-            const wing1X = shape.x2 - headLength * Math.cos(angle - Math.PI / 6);
-            const wing1Y = shape.y2 - headLength * Math.sin(angle - Math.PI / 6);
-            const wing2X = shape.x2 - headLength * Math.cos(angle + Math.PI / 6);
-            const wing2Y = shape.y2 - headLength * Math.sin(angle + Math.PI / 6);
-            const l1 = generator.line(shape.x1, shape.y1, shape.x2, shape.y2, roughOptions);
-            const l2 = generator.line(shape.x2, shape.y2, wing1X, wing1Y, roughOptions);
-            const l3 = generator.line(shape.x2, shape.y2, wing2X, wing2Y, roughOptions);
+            const angle = Math.atan2(dy, dx);
+            const wing1X = dx - headLength * Math.cos(angle - Math.PI / 6);
+            const wing1Y = dy - headLength * Math.sin(angle - Math.PI / 6);
+            const wing2X = dx - headLength * Math.cos(angle + Math.PI / 6);
+            const wing2Y = dy - headLength * Math.sin(angle + Math.PI / 6);
+            const l1 = generator.line(0, 0, dx, dy, roughOptions);
+            const l2 = generator.line(dx, dy, wing1X, wing1Y, roughOptions);
+            const l3 = generator.line(dx, dy, wing2X, wing2Y, roughOptions);
             drawable = [l1, l2, l3];
             this.setCachedDrawable(cacheKey, drawable);
           }
+          this.ctx.save();
+          this.ctx.translate(shape.x1, shape.y1);
           if (Array.isArray(drawable)) {
             drawable.forEach((d) => rc.draw(d));
           } else {
             rc.draw(drawable);
           }
+          this.ctx.restore();
         } else {
           this.ctx.beginPath();
           this.ctx.moveTo(shape.x1, shape.y1);
@@ -1283,8 +1379,18 @@ export class Game {
   }
 
   /** Render the minimap overview */
-  private drawMinimap() {
+  private drawMinimap(force = false) {
     if (!this.minimapCanvas || !this.minimapCtx) return;
+
+    // During active interaction (drawing, dragging, panning), throttle minimap to 250ms
+    const isInteracting = this.clicked || this.isDragging || this.isPanning || this.isErasing;
+    const minInterval = isInteracting ? 250 : 100;
+
+    const now = Date.now();
+    if (!force && !this.isDraggingMinimap && now - this.lastMinimapDraw < minInterval) {
+      return;
+    }
+    this.lastMinimapDraw = now;
 
     const mw = this.minimapCanvas.width;
     const mh = this.minimapCanvas.height;
@@ -1420,19 +1526,27 @@ export class Game {
     this.clearCanvas();
   }
 
+  private minimapRect = { left: 0, top: 0, width: 0, height: 0 };
+
+  private updateMinimapRect() {
+    if (this.minimapCanvas) {
+      const r = this.minimapCanvas.getBoundingClientRect();
+      this.minimapRect = { left: r.left, top: r.top, width: r.width, height: r.height };
+    }
+  }
+
   // Minimap mouse handlers
   private minimapMouseDownHandler = (e: MouseEvent) => {
     e.preventDefault();
     this.isDraggingMinimap = true;
-    const rect = this.minimapCanvas!.getBoundingClientRect();
-    const world = this.minimapToWorld(e.clientX - rect.left, e.clientY - rect.top);
+    this.updateMinimapRect();
+    const world = this.minimapToWorld(e.clientX - this.minimapRect.left, e.clientY - this.minimapRect.top);
     this.panToWorld(world.x, world.y);
   };
 
   private minimapMouseMoveHandler = (e: MouseEvent) => {
     if (!this.isDraggingMinimap) return;
-    const rect = this.minimapCanvas!.getBoundingClientRect();
-    const world = this.minimapToWorld(e.clientX - rect.left, e.clientY - rect.top);
+    const world = this.minimapToWorld(e.clientX - this.minimapRect.left, e.clientY - this.minimapRect.top);
     this.panToWorld(world.x, world.y);
   };
 
@@ -1550,6 +1664,24 @@ export class Game {
 
   // --- Wheel handler for zoom ---
 
+  private lastZoomNotify = 0;
+  private canvasRect = { left: 0, top: 0, width: 0, height: 0 };
+
+  public updateCanvasRect() {
+    if (this.canvas) {
+      const r = this.canvas.getBoundingClientRect();
+      this.canvasRect = { left: r.left, top: r.top, width: r.width, height: r.height };
+    }
+  }
+
+  private notifyZoomChange(force = false) {
+    if (!this.onZoomChange) return;
+    const now = Date.now();
+    if (!force && now - this.lastZoomNotify < 80) return;
+    this.lastZoomNotify = now;
+    this.onZoomChange(this.scale);
+  }
+
   /** Apply a zoom factor anchored to the center of the viewport */
   private applyZoom(newScale: number) {
     const centerX = this.canvas.width / 2;
@@ -1560,7 +1692,7 @@ export class Game {
     this.panX -= worldAfter.x - worldBefore.x;
     this.panY -= worldAfter.y - worldBefore.y;
     this.clearCanvas();
-    if (this.onZoomChange) this.onZoomChange(this.scale);
+    this.notifyZoomChange(true);
   }
 
   public getScale(): number {
@@ -1580,7 +1712,7 @@ export class Game {
     this.panX = 0;
     this.panY = 0;
     this.clearCanvas();
-    if (this.onZoomChange) this.onZoomChange(this.scale);
+    this.notifyZoomChange(true);
   }
 
   public fitToScreen() {
@@ -1598,15 +1730,14 @@ export class Game {
     this.panX = bounds.minX - padding;
     this.panY = bounds.minY - padding;
     this.clearCanvas();
-    if (this.onZoomChange) this.onZoomChange(this.scale);
+    this.notifyZoomChange(true);
   }
 
   wheelHandler = (e: WheelEvent) => {
     e.preventDefault();
 
-    const rect = this.canvas.getBoundingClientRect();
-    const mouseX = e.clientX - rect.left;
-    const mouseY = e.clientY - rect.top;
+    const mouseX = e.clientX - this.canvasRect.left;
+    const mouseY = e.clientY - this.canvasRect.top;
 
     // World position under the cursor before zoom
     const worldBefore = this.screenToWorld(mouseX, mouseY);
@@ -1623,7 +1754,7 @@ export class Game {
     this.panY -= worldAfter.y - worldBefore.y;
 
     this.clearCanvas();
-    if (this.onZoomChange) this.onZoomChange(this.scale);
+    this.notifyZoomChange(false);
   };
 
   // --- Mouse handlers ---
@@ -1650,10 +1781,8 @@ export class Game {
   }
 
   mouseDownHandler = (e: MouseEvent) => {
-
-    const rect = this.canvas.getBoundingClientRect();
-    const screenX = e.clientX - rect.left;
-    const screenY = e.clientY - rect.top;
+    const screenX = e.clientX - this.canvasRect.left;
+    const screenY = e.clientY - this.canvasRect.top;
 
     // Middle mouse button (button === 1), space held, OR Hand (Pan) tool: start panning canvas
     if (e.button === 1 || this.spacePressed || this.selectedTool === "hand") {
@@ -1763,9 +1892,8 @@ export class Game {
     this.previewShape = null;
     this.previewPencilPoints = [];
 
-    const rect = this.canvas.getBoundingClientRect();
-    const screenX = e.clientX - rect.left;
-    const screenY = e.clientY - rect.top;
+    const screenX = e.clientX - this.canvasRect.left;
+    const screenY = e.clientY - this.canvasRect.top;
     const world = this.screenToWorld(screenX, screenY);
     const endX = world.x;
     const endY = world.y;
@@ -1881,9 +2009,8 @@ export class Game {
   }
 
   mouseMoveHandler = (e: MouseEvent) => {
-    const rect = this.canvas.getBoundingClientRect();
-    const screenX = e.clientX - rect.left;
-    const screenY = e.clientY - rect.top;
+    const screenX = e.clientX - this.canvasRect.left;
+    const screenY = e.clientY - this.canvasRect.top;
 
     // Broadcast cursor position (throttled)
     this.broadcastCursor(screenX, screenY);
@@ -1942,9 +2069,12 @@ export class Game {
 
     // Update live preview state so renderCanvas() picks it up on next RAF tick
     if (selectedTool === "pencil") {
-      this.currentPencilPoints.push({ x: currentX, y: currentY });
-      this.previewShape = null;
-      this.previewPencilPoints = [...this.currentPencilPoints];
+      const lastP = this.currentPencilPoints[this.currentPencilPoints.length - 1];
+      if (!lastP || Math.hypot(currentX - lastP.x, currentY - lastP.y) >= 2) {
+        this.currentPencilPoints.push({ x: currentX, y: currentY });
+        this.previewShape = null;
+        this.previewPencilPoints = [...this.currentPencilPoints];
+      }
     } else if (selectedTool === "rect") {
       this.previewPencilPoints = [];
       this.previewShape = {
@@ -2002,9 +2132,8 @@ export class Game {
   };
 
   createTextShapeAt = (clientX: number, clientY: number) => {
-    const rect = this.canvas.getBoundingClientRect();
-    const screenX = clientX - rect.left;
-    const screenY = clientY - rect.top;
+    const screenX = clientX - this.canvasRect.left;
+    const screenY = clientY - this.canvasRect.top;
     const world = this.screenToWorld(screenX, screenY);
 
     const fontSize = Math.round(20 * this.scale);
@@ -2121,7 +2250,6 @@ export class Game {
       this.lastTouchX = touch.clientX;
       this.lastTouchY = touch.clientY;
 
-      const rect = this.canvas.getBoundingClientRect();
       const mouseEvent = new MouseEvent("mousedown", {
         clientX: touch.clientX,
         clientY: touch.clientY,
@@ -2184,11 +2312,10 @@ export class Game {
 
       if (this.initialTouchDistance > 0) {
         const factor = currentDistance / this.initialTouchDistance;
-        const rect = this.canvas.getBoundingClientRect();
         
         // Center in canvas coordinates
-        const canvasCenterX = currentCenter.x - rect.left;
-        const canvasCenterY = currentCenter.y - rect.top;
+        const canvasCenterX = currentCenter.x - this.canvasRect.left;
+        const canvasCenterY = currentCenter.y - this.canvasRect.top;
 
         // Save world coordinates before zoom
         const worldBefore = this.screenToWorld(canvasCenterX, canvasCenterY);
@@ -2214,9 +2341,7 @@ export class Game {
 
       this.lastTouchCenter = currentCenter;
       this.clearCanvas();
-      if (this.onZoomChange) {
-        this.onZoomChange(this.scale);
-      }
+      this.notifyZoomChange(false);
 
       if (e.cancelable) {
         e.preventDefault();

@@ -698,8 +698,21 @@ wss.on("connection", async function connection(ws, request) {
   });
 });
 
+// Optional Keep-Alive Ping for free-tier deployments (e.g. Render/Koyeb)
+const wsKeepAliveUrl = process.env.KEEP_ALIVE_URL;
+let wsKeepAliveTimer: NodeJS.Timeout | null = null;
+if (wsKeepAliveUrl) {
+  console.log(`ws-backend keep-alive monitor initialized for ${wsKeepAliveUrl}`);
+  wsKeepAliveTimer = setInterval(() => {
+    fetch(`${wsKeepAliveUrl}/health`)
+      .then((r) => r.json())
+      .catch((err) => console.warn("ws-backend keep-alive ping error:", err?.message || err));
+  }, 10 * 60 * 1000);
+}
+
 function handleWsShutdown(signal: string) {
   console.log(`Received ${signal}, closing ws-backend...`);
+  if (wsKeepAliveTimer) clearInterval(wsKeepAliveTimer);
   clearInterval(heartbeatInterval);
   clearInterval(cacheCleanupInterval);
   wss.close(() => {

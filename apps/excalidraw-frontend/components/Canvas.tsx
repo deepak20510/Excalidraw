@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useRef, useState } from "react";
+import { memo, useCallback, useEffect, useRef, useState } from "react";
 import { IconButton } from "./IconButton";
 import {
   ArrowDown,
@@ -73,6 +73,7 @@ export function Canvas({
   isLocked: initialIsLocked = false,
   roomName = "",
   initialMemberRoles = {},
+  initialShapes,
 }: {
   socket: WebSocket;
   roomId: string;
@@ -83,6 +84,7 @@ export function Canvas({
   isLocked?: boolean;
   roomName?: string;
   initialMemberRoles?: Record<string, "editor" | "viewer">;
+  initialShapes?: Shape[] | Promise<Shape[]>;
 }) {
   const canvasRef = useRef<HTMLCanvasElement>(null);
   const minimapRef = useRef<HTMLCanvasElement>(null);
@@ -118,6 +120,13 @@ export function Canvas({
     game?.setTool(selectedTool);
   }, [selectedTool, game]);
 
+  // Handle socket updates (e.g. on reconnect) without recreating game instance
+  useEffect(() => {
+    if (game && socket) {
+      game.updateSocket(socket);
+    }
+  }, [game, socket]);
+
   useEffect(() => {
     if (canvasRef.current) {
       const g = new Game(
@@ -125,7 +134,8 @@ export function Canvas({
         roomId,
         socket,
         userId ?? "",
-        userName ?? "User"
+        userName ?? "User",
+        initialShapes
       );
       setGame(g);
 
@@ -141,7 +151,7 @@ export function Canvas({
         g.destroy();
       };
     }
-  }, [canvasRef, roomId, socket, userId, userName, onReady]);
+  }, [canvasRef, roomId, userId, userName, onReady]);
 
   useEffect(() => {
     if (game) {
@@ -157,16 +167,32 @@ export function Canvas({
     }
   }, [game]);
 
-  // Track remote cursors from Game for "follow" feature
+  // Track remote cursors from Game for "follow" feature (guarded to avoid unneeded state updates)
   useEffect(() => {
     if (!game) return;
     const interval = setInterval(() => {
       const cursors = game.getRemoteCursors();
-      const newPositions = new Map<string, { x: number; y: number }>();
-      cursors.forEach((cursor, uid) => {
-        newPositions.set(uid, { x: cursor.x, y: cursor.y });
+      if (cursors.size === 0) {
+        setCursorPositions((prev) => (prev.size === 0 ? prev : new Map()));
+        return;
+      }
+      setCursorPositions((prev) => {
+        let changed = prev.size !== cursors.size;
+        if (!changed) {
+          cursors.forEach((c, uid) => {
+            const p = prev.get(uid);
+            if (!p || p.x !== c.x || p.y !== c.y) {
+              changed = true;
+            }
+          });
+        }
+        if (!changed) return prev;
+        const newPositions = new Map<string, { x: number; y: number }>();
+        cursors.forEach((cursor, uid) => {
+          newPositions.set(uid, { x: cursor.x, y: cursor.y });
+        });
+        return newPositions;
       });
-      setCursorPositions(newPositions);
     }, 500);
     return () => clearInterval(interval);
   }, [game]);
@@ -236,6 +262,20 @@ export function Canvas({
       socket.removeEventListener("open", sendJoinRoom);
     };
   }, [socket, roomId, userId, isAdmin, router]);
+
+  // Window resize listener
+  useEffect(() => {
+    function handleResize() {
+      if (canvasRef.current && game) {
+        canvasRef.current.width = window.innerWidth;
+        canvasRef.current.height = window.innerHeight;
+        game.updateCanvasRect();
+        game.clearCanvas();
+      }
+    }
+    window.addEventListener("resize", handleResize);
+    return () => window.removeEventListener("resize", handleResize);
+  }, [game]);
 
   // Global Ctrl+K listener for Command Palette
   useEffect(() => {
@@ -699,7 +739,7 @@ export function Canvas({
   );
 }
 
-function Topbar({
+const Topbar = memo(function Topbar({
   selectedTool,
   setSelectedTool,
   game,
@@ -827,9 +867,9 @@ function Topbar({
       </div>
     </div>
   );
-}
+});
 
-function ZoomControls({
+const ZoomControls = memo(function ZoomControls({
   zoomLevel,
   onZoomIn,
   onZoomOut,
@@ -883,4 +923,4 @@ function ZoomControls({
       </button>
     </div>
   );
-}
+});
