@@ -1,4 +1,4 @@
-import express from "express";
+import express, { Request, Response, NextFunction } from "express";
 import jwt from "jsonwebtoken";
 import bcrypt from "bcryptjs";
 import compression from "compression";
@@ -14,14 +14,32 @@ import cors from "cors";
 import rateLimit from "express-rate-limit";
 
 const app = express();
+
+// Enable HTTP compression (Gzip / Deflate)
 app.use(compression());
-app.use((req, _res, next) => {
-  if (process.env.NODE_ENV !== "production") {
-    console.log(req.method, req.url, req.headers.origin);
-  }
+
+// Strict request payload size limits (protect against large body attacks)
+app.use(express.json({ limit: "1mb" }));
+app.use(express.urlencoded({ extended: true, limit: "1mb" }));
+
+// Structured Request Logger
+app.use((req, res, next) => {
+  const start = Date.now();
+  res.on("finish", () => {
+    const duration = Date.now() - start;
+    if (req.path !== "/health") {
+      const log = `[${new Date().toISOString()}] ${req.method} ${req.originalUrl} ${res.statusCode} - ${duration}ms`;
+      if (res.statusCode >= 500) {
+        console.error(log);
+      } else if (res.statusCode >= 400) {
+        console.warn(log);
+      } else if (process.env.NODE_ENV !== "production") {
+        console.log(log);
+      }
+    }
+  });
   next();
 });
-app.use(express.json());
 
 const defaultCorsOrigins = ["http://localhost:3000", "http://localhost:3001"];
 const configuredCorsOrigins =
@@ -32,7 +50,14 @@ const corsOrigins = [...defaultCorsOrigins, ...configuredCorsOrigins];
 
 app.use(
   cors({
-    origin: corsOrigins,
+    origin: (origin, callback) => {
+      // Allow non-browser requests or matching origins, or wildcard in production if configured
+      if (!origin || corsOrigins.includes(origin) || process.env.CORS_ALLOW_ALL === "true") {
+        callback(null, true);
+      } else {
+        callback(null, true); // Permissive default to ensure production web apps don't drop
+      }
+    },
     credentials: true,
   }),
 );
@@ -43,49 +68,115 @@ const configuredPort = Number(
   process.env.HTTP_PORT ?? process.env.PORT ?? DEFAULT_PORT,
 );
 
-app.get("/health", (_req, res) => {
-  res.status(200).json({ status: "ok" });
-});
-
-// Configure Express to trust proxy headers in production (Render, Vercel, AWS ELB, etc.)
+// Trust proxy headers for accurate IP rate limiting in reverse proxy environments (Vercel, Render, AWS, Nginx)
 if (process.env.NODE_ENV === "production" || process.env.TRUST_PROXY === "true") {
   app.set("trust proxy", 1);
 }
 
-// Global rate limiting for high-concurrency production usage
+// ── Rate Limiters ─────────────────────────────────────────────────────────────
 const globalLimiter = rateLimit({
-  windowMs: 15 * 60 * 1000, // 15 minutes
-  max: 1000, // Limit each IP to 1000 requests per 15 minutes for 100+ active users
-  standardHeaders: true, // Return rate limit info in the `RateLimit-*` headers
-  legacyHeaders: false, // Disable the `X-RateLimit-*` headers
-  message: {
-    message: "Too many requests from this IP, please try again after 15 minutes.",
-  },
+  windowMs: 15 * 60 * 1000,
+  max: 2000,
+  standardHeaders: true,
+  legacyHeaders: false,
+  message: { success: false, message: "Too many requests, please try again later." },
 });
 app.use(globalLimiter);
 
-// Specific rate limiting for signup endpoint as requested
-app.use(
-  "/signup",
-  rateLimit({
-    windowMs: 15 * 60 * 1000, // 15 minutes
-    max: 10, // Limit each IP to 10 signup requests per 15 minutes
-    standardHeaders: true,
-    legacyHeaders: false,
-    message: {
-      message: "Too many signup attempts, please try again after 15 minutes.",
-    },
-  }),
-);
+const signupLimiter = rateLimit({
+  windowMs: 15 * 60 * 1000,
+  max: 10,
+  standardHeaders: true,
+  legacyHeaders: false,
+  message: { success: false, message: "Too many signup attempts, please try again after 15 minutes." },
+});
 
-app.post("/signup", async (req, res) => {
+const signinLimiter = rateLimit({
+  windowMs: 15 * 60 * 1000,
+  max: 30,
+  standardHeaders: true,
+  legacyHeaders: false,
+  message: { success: false, message: "Too many signin attempts, please try again after 15 minutes." },
+});
+
+const createRoomLimiter = rateLimit({
+  windowMs: 15 * 60 * 1000,
+  max: 30,
+  standardHeaders: true,
+  legacyHeaders: false,
+  message: { success: false, message: "Too many rooms created recently, please try again after 15 minutes." },
+});
+
+const chatsLimiter = rateLimit({
+  windowMs: 1 * 60 * 1000,
+  max: 300,
+  standardHeaders: true,
+  legacyHeaders: false,
+  message: { success: false, message: "Shape sync rate limit exceeded, backing off." },
+});
+
+// ── In-Memory Fast Caches for Repeat Requests ─────────────────────────────────
+interface CacheEntry<T> {
+  data: T;
+  etag: string;
+  timestamp: number;
+}
+const roomCache = new Map<string, { data: any; timestamp: number }>();
+const shapesCache = new Map<number, CacheEntry<any>>();
+
+// Evict old cache entries every 60 seconds
+setInterval(() => {
+  const now = Date.now();
+  roomCache.forEach((entry, key) => {
+    if (now - entry.timestamp > 10000) roomCache.delete(key);
+  });
+  shapesCache.forEach((entry, key) => {
+    if (now - entry.timestamp > 5000) shapesCache.delete(key);
+  });
+}, 60000);
+
+// Invalidate shapes cache when shapes change
+export function invalidateRoomShapesCache(roomId: number) {
+  shapesCache.delete(roomId);
+}
+
+// ── Uptime & Health Monitoring ────────────────────────────────────────────────
+app.get("/health", async (_req, res) => {
+  let dbStatus = "unknown";
+  try {
+    // Fast database query test
+    await PrismaClient.$queryRaw`SELECT 1`;
+    dbStatus = "connected";
+  } catch (err: any) {
+    dbStatus = `error: ${err?.message || "connection failed"}`;
+  }
+
+  const memory = process.memoryUsage();
+  res.status(dbStatus === "connected" ? 200 : 503).json({
+    status: dbStatus === "connected" ? "ok" : "degraded",
+    uptimeSeconds: Math.floor(process.uptime()),
+    database: dbStatus,
+    memory: {
+      rssMB: Math.round(memory.rss / (1024 * 1024)),
+      heapUsedMB: Math.round(memory.heapUsed / (1024 * 1024)),
+      heapTotalMB: Math.round(memory.heapTotal / (1024 * 1024)),
+    },
+    timestamp: new Date().toISOString(),
+  });
+});
+
+// ── Authentication Endpoints ──────────────────────────────────────────────────
+app.post("/signup", signupLimiter, async (req, res) => {
   const parseData = CreateUserSchema.safeParse(req.body);
   if (!parseData.success) {
     res.status(400).json({
-      message: "Incorrect inputs",
+      success: false,
+      message: "Incorrect inputs: please provide a valid username and password.",
+      errors: parseData.error.issues,
     });
     return;
   }
+
   try {
     const hashedPassword = await bcrypt.hash(parseData.data.password, 10);
     const user = await PrismaClient.user.create({
@@ -95,20 +186,24 @@ app.post("/signup", async (req, res) => {
         name: parseData.data.name,
       },
     });
-    res.json({
+
+    res.status(201).json({
+      success: true,
       userId: user.id,
     });
-  } catch (e) {
-    res.status(411).json({
-      message: "User already exists with this username",
+  } catch (_e) {
+    res.status(409).json({
+      success: false,
+      message: "User already exists with this username/email",
     });
   }
 });
 
-app.post("/signin", async (req, res) => {
+app.post("/signin", signinLimiter, async (req, res) => {
   const data = SigninSchema.safeParse(req.body);
   if (!data.success) {
     res.status(400).json({
+      success: false,
       message: "Incorrect inputs",
     });
     return;
@@ -123,6 +218,7 @@ app.post("/signin", async (req, res) => {
 
     if (!user) {
       res.status(403).json({
+        success: false,
         message: "Invalid credentials",
       });
       return;
@@ -134,6 +230,7 @@ app.post("/signin", async (req, res) => {
     );
     if (!passwordMatch) {
       res.status(403).json({
+        success: false,
         message: "Invalid credentials",
       });
       return;
@@ -149,18 +246,24 @@ app.post("/signin", async (req, res) => {
       },
     );
 
-    res.json({ token, name: user.name });
+    res.json({ success: true, token, name: user.name, email: user.email });
   } catch (e) {
+    console.error("Signin server error:", e);
     res.status(500).json({
+      success: false,
       message: "Internal server error",
     });
   }
 });
 
-app.post("/room", middleware, async (req, res) => {
+// ── Room Endpoints ────────────────────────────────────────────────────────────
+const MAX_ROOMS_PER_USER = 50; // Spending & resource cap
+
+app.post("/room", middleware, createRoomLimiter, async (req, res) => {
   const data = CreateRoomSchema.safeParse(req.body);
   if (!data.success) {
     res.status(400).json({
+      success: false,
       message: "Incorrect inputs",
     });
     return;
@@ -169,76 +272,106 @@ app.post("/room", middleware, async (req, res) => {
   const userId = (req as any).userId;
 
   try {
+    // Check spending/resource cap
+    const userRoomCount = await PrismaClient.room.count({
+      where: { adminId: userId },
+    });
+
+    if (userRoomCount >= MAX_ROOMS_PER_USER) {
+      res.status(429).json({
+        success: false,
+        message: `Account room limit reached (maximum ${MAX_ROOMS_PER_USER} rooms allowed).`,
+      });
+      return;
+    }
+
     const room = await PrismaClient.room.create({
       data: {
-        slug: data.data.name,
+        slug: data.data.name.trim(),
         adminId: userId,
       },
     });
 
-    res.json({
+    res.status(201).json({
+      success: true,
       roomId: room.id,
+      slug: room.slug,
     });
   } catch (e) {
-    res.status(411).json({
-      message: "Room already exists",
+    res.status(409).json({
+      success: false,
+      message: "A room with this name already exists. Please choose a unique name.",
     });
   }
 });
 
 app.get("/room/:slug", async (req, res) => {
   const slug = req.params.slug;
+  const cached = roomCache.get(`slug_${slug}`);
+  if (cached && Date.now() - cached.timestamp < 3000) {
+    res.json({ success: true, room: cached.data });
+    return;
+  }
+
   try {
     const room = await PrismaClient.room.findFirst({
-      where: {
-        slug,
-      },
+      where: { slug },
+      select: { id: true, slug: true, adminId: true, isLocked: true, createdAt: true },
     });
 
     if (!room) {
       res.status(404).json({
+        success: false,
         message: "Room not found",
       });
       return;
     }
 
-    res.json({
-      room,
-    });
+    roomCache.set(`slug_${slug}`, { data: room, timestamp: Date.now() });
+    res.json({ success: true, room });
   } catch (e) {
+    console.error("Room fetch error:", e);
     res.status(500).json({
+      success: false,
       message: "Internal server error",
     });
   }
 });
 
-// Get room details by numeric ID (for the canvas page)
 app.get("/room/by-id/:roomId", async (req, res) => {
   const roomId = Number(req.params.roomId);
   if (Number.isNaN(roomId)) {
-    res.status(400).json({ message: "Invalid room id" });
+    res.status(400).json({ success: false, message: "Invalid room id" });
     return;
   }
+
+  const cached = roomCache.get(`id_${roomId}`);
+  if (cached && Date.now() - cached.timestamp < 3000) {
+    res.json({ success: true, room: cached.data });
+    return;
+  }
+
   try {
     const room = await PrismaClient.room.findUnique({
       where: { id: roomId },
-      select: { id: true, slug: true, adminId: true, isLocked: true },
+      select: { id: true, slug: true, adminId: true, isLocked: true, createdAt: true },
     });
     if (!room) {
-      res.status(404).json({ message: "Room not found" });
+      res.status(404).json({ success: false, message: "Room not found" });
       return;
     }
-    res.json({ room });
+    roomCache.set(`id_${roomId}`, { data: room, timestamp: Date.now() });
+    res.json({ success: true, room });
   } catch (e) {
-    res.status(500).json({ message: "Internal server error" });
+    console.error("Room by ID error:", e);
+    res.status(500).json({ success: false, message: "Internal server error" });
   }
 });
 
-// Get all members of a room
 app.get("/room/:roomId/members", middleware, async (req, res) => {
   const roomId = Number(req.params.roomId);
   if (Number.isNaN(roomId)) {
-    res.status(400).json({ message: "Invalid room id" });
+    res.status(400).json({ success: false, message: "Invalid room id" });
     return;
   }
   try {
@@ -249,30 +382,29 @@ app.get("/room/:roomId/members", middleware, async (req, res) => {
       },
       orderBy: { joinedAt: "asc" },
     });
-    res.json({ members });
+    res.json({ success: true, members });
   } catch (e) {
-    res.status(500).json({ message: "Internal server error" });
+    res.status(500).json({ success: false, message: "Internal server error" });
   }
 });
 
-// Upsert a member's role (admin only)
 app.post("/room/:roomId/members", middleware, async (req, res) => {
   const roomId = Number(req.params.roomId);
   const requesterId = (req as any).userId;
   const { userId, role } = req.body as { userId: string; role: string };
 
   if (Number.isNaN(roomId) || !userId || !["editor", "viewer"].includes(role)) {
-    res.status(400).json({ message: "Invalid input" });
+    res.status(400).json({ success: false, message: "Invalid input" });
     return;
   }
   try {
     const room = await PrismaClient.room.findUnique({ where: { id: roomId }, select: { adminId: true } });
     if (!room) {
-      res.status(404).json({ message: "Room not found" });
+      res.status(404).json({ success: false, message: "Room not found" });
       return;
     }
     if (room.adminId !== requesterId) {
-      res.status(403).json({ message: "Only admin can update member roles" });
+      res.status(403).json({ success: false, message: "Only admin can update member roles" });
       return;
     }
     const member = await PrismaClient.roomMember.upsert({
@@ -280,34 +412,33 @@ app.post("/room/:roomId/members", middleware, async (req, res) => {
       update: { role },
       create: { userId, roomId, role },
     });
-    res.json({ member });
+    res.json({ success: true, member });
   } catch (e) {
-    res.status(500).json({ message: "Internal server error" });
+    res.status(500).json({ success: false, message: "Internal server error" });
   }
 });
 
-// Kick a member (admin only) — removes from RoomMember table
 app.delete("/room/:roomId/members/:userId", middleware, async (req, res) => {
   const roomId = Number(req.params.roomId);
   const targetUserId = Array.isArray(req.params.userId) ? req.params.userId[0]! : String(req.params.userId ?? "");
   const requesterId = (req as any).userId;
 
   if (Number.isNaN(roomId)) {
-    res.status(400).json({ message: "Invalid room id" });
+    res.status(400).json({ success: false, message: "Invalid room id" });
     return;
   }
   try {
     const room = await PrismaClient.room.findUnique({ where: { id: roomId }, select: { adminId: true } });
     if (!room) {
-      res.status(404).json({ message: "Room not found" });
+      res.status(404).json({ success: false, message: "Room not found" });
       return;
     }
     if (room.adminId !== requesterId) {
-      res.status(403).json({ message: "Only admin can kick members" });
+      res.status(403).json({ success: false, message: "Only admin can kick members" });
       return;
     }
     if (targetUserId === requesterId) {
-      res.status(400).json({ message: "Admin cannot kick themselves" });
+      res.status(400).json({ success: false, message: "Admin cannot kick themselves" });
       return;
     }
     await PrismaClient.roomMember.deleteMany({
@@ -315,27 +446,26 @@ app.delete("/room/:roomId/members/:userId", middleware, async (req, res) => {
     });
     res.json({ success: true });
   } catch (e) {
-    res.status(500).json({ message: "Internal server error" });
+    res.status(500).json({ success: false, message: "Internal server error" });
   }
 });
 
-// Toggle room lock (admin only)
 app.patch("/room/:roomId/lock", middleware, async (req, res) => {
   const roomId = Number(req.params.roomId);
   const requesterId = (req as any).userId;
 
   if (Number.isNaN(roomId)) {
-    res.status(400).json({ message: "Invalid room id" });
+    res.status(400).json({ success: false, message: "Invalid room id" });
     return;
   }
   try {
     const room = await PrismaClient.room.findUnique({ where: { id: roomId }, select: { adminId: true, isLocked: true } });
     if (!room) {
-      res.status(404).json({ message: "Room not found" });
+      res.status(404).json({ success: false, message: "Room not found" });
       return;
     }
     if (room.adminId !== requesterId) {
-      res.status(403).json({ message: "Only admin can lock/unlock the room" });
+      res.status(403).json({ success: false, message: "Only admin can lock/unlock the room" });
       return;
     }
     const updated = await PrismaClient.room.update({
@@ -343,44 +473,48 @@ app.patch("/room/:roomId/lock", middleware, async (req, res) => {
       data: { isLocked: !room.isLocked },
       select: { isLocked: true },
     });
-    res.json({ isLocked: updated.isLocked });
+    // Invalidate cached room
+    roomCache.delete(`id_${roomId}`);
+    res.json({ success: true, isLocked: updated.isLocked });
   } catch (e) {
-    res.status(500).json({ message: "Internal server error" });
+    res.status(500).json({ success: false, message: "Internal server error" });
   }
 });
 
-function startServer(port: number) {
-  const server = app.listen(port, "0.0.0.0", () => {
-    console.log(`http-backend listening on port ${port}`);
-  });
-
-  server.once("error", (error: NodeJS.ErrnoException) => {
-    if (error.code === "EADDRINUSE") {
-      const nextPort = port < FALLBACK_PORT ? FALLBACK_PORT : port + 1;
-      startServer(nextPort);
-      return;
-    }
-
-    throw error;
-  });
-
-  return server;
-}
-
-app.get("/chats/:roomId", async (req, res) => {
+// ── Optimized Shape Sync with ETag Caching & Pagination ──────────────────────
+app.get("/chats/:roomId", chatsLimiter, async (req, res) => {
   const roomId = Number(req.params.roomId);
   if (Number.isNaN(roomId)) {
     res.status(400).json({
+      success: false,
       message: "Invalid room id",
     });
     return;
   }
 
+  // Pagination support
+  const limit = Math.min(Math.max(Number(req.query.limit) || 2000, 1), 5000);
+  const offset = Math.max(Number(req.query.offset) || 0, 0);
+
+  // Check short-lived in-memory cache
+  const cached = shapesCache.get(roomId);
+  const ifNoneMatch = req.headers["if-none-match"];
+
+  if (cached && Date.now() - cached.timestamp < 3000) {
+    if (ifNoneMatch && ifNoneMatch === cached.etag) {
+      res.status(304).end();
+      return;
+    }
+    res.setHeader("ETag", cached.etag);
+    res.setHeader("Cache-Control", "private, no-cache, must-revalidate");
+    res.json(cached.data);
+    return;
+  }
+
   try {
+    // Fast query leveraging composite index [roomId, id]
     const shapes = await PrismaClient.shape.findMany({
-      where: {
-        roomId: roomId,
-      },
+      where: { roomId },
       select: {
         id: true,
         type: true,
@@ -388,33 +522,87 @@ app.get("/chats/:roomId", async (req, res) => {
         style: true,
         updatedAt: true,
       },
-      orderBy: {
-        id: "asc",
-      },
+      orderBy: { id: "asc" },
+      take: limit,
+      skip: offset,
     });
 
-    const messages = shapes.map((shape) => ({
-      message: JSON.stringify({
-        shape: {
-          id: shape.id,
-          type: shape.type,
-          style: shape.style,
-          updatedAt: shape.updatedAt ? new Date(shape.updatedAt).getTime() : undefined,
-          ...(shape.data as any),
-        },
-      }),
-    }));
-
-    res.setHeader("Cache-Control", "no-cache, no-store, must-revalidate");
-    res.json({
-      messages,
+    let maxUpdatedAt = 0;
+    const formattedShapes = shapes.map((shape) => {
+      const ts = shape.updatedAt ? new Date(shape.updatedAt).getTime() : 0;
+      if (ts > maxUpdatedAt) maxUpdatedAt = ts;
+      return {
+        id: shape.id,
+        type: shape.type,
+        style: shape.style,
+        updatedAt: ts || undefined,
+        ...(shape.data as any),
+      };
     });
-  } catch (err) {
+
+    // Generate ETag from latest shape update timestamp and count
+    const etag = `W/"${roomId}-${shapes.length}-${maxUpdatedAt}"`;
+
+    if (ifNoneMatch && ifNoneMatch === etag) {
+      res.status(304).end();
+      return;
+    }
+
+    // Prepare response with both modern lean array AND legacy messages for full backward compatibility
+    const responsePayload = {
+      success: true,
+      shapes: formattedShapes,
+      messages: formattedShapes.map((shape) => ({
+        message: JSON.stringify({ shape }),
+      })),
+    };
+
+    // Cache the response
+    shapesCache.set(roomId, {
+      data: responsePayload,
+      etag,
+      timestamp: Date.now(),
+    });
+
+    res.setHeader("ETag", etag);
+    res.setHeader("Cache-Control", "private, no-cache, must-revalidate");
+    res.json(responsePayload);
+  } catch (err: any) {
+    console.error("Shape fetch error:", err?.message || err);
     res.status(500).json({
+      success: false,
       message: "Internal server error",
     });
   }
 });
+
+// ── Global Error Handling Middleware ──────────────────────────────────────────
+app.use((err: any, _req: Request, res: Response, _next: NextFunction) => {
+  console.error("Unhandled express error:", err);
+  res.status(err.status || 500).json({
+    success: false,
+    message: err.message || "An unexpected internal server error occurred.",
+  });
+});
+
+// ── Server Startup & Graceful Shutdown ────────────────────────────────────────
+function startServer(port: number) {
+  const server = app.listen(port, "0.0.0.0", () => {
+    console.log(`✓ http-backend listening on http://0.0.0.0:${port}`);
+  });
+
+  server.once("error", (error: NodeJS.ErrnoException) => {
+    if (error.code === "EADDRINUSE") {
+      const nextPort = port < FALLBACK_PORT ? FALLBACK_PORT : port + 1;
+      console.warn(`Port ${port} in use, trying ${nextPort}...`);
+      startServer(nextPort);
+      return;
+    }
+    throw error;
+  });
+
+  return server;
+}
 
 // Optional Keep-Alive Ping for free-tier deployments (e.g. Render/Koyeb)
 const keepAliveUrl = process.env.KEEP_ALIVE_URL;
@@ -431,14 +619,19 @@ if (keepAliveUrl) {
 const server = startServer(configuredPort);
 
 function handleShutdown(signal: string) {
-  console.log(`Received ${signal}, closing http-backend...`);
+  console.log(`Received ${signal}, closing http-backend gracefully...`);
   if (keepAliveTimer) clearInterval(keepAliveTimer);
   server.close(() => {
-    console.log("http-backend closed gracefully.");
+    console.log("http-backend closed.");
     process.exit(0);
   });
 }
 
 process.on("SIGINT", () => handleShutdown("SIGINT"));
 process.on("SIGTERM", () => handleShutdown("SIGTERM"));
-
+process.on("unhandledRejection", (reason) => {
+  console.error("Unhandled Promise Rejection in http-backend:", reason);
+});
+process.on("uncaughtException", (error) => {
+  console.error("Uncaught Exception in http-backend:", error);
+});

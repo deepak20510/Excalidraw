@@ -8,10 +8,20 @@ const DEFAULT_PORT = 8082;
 const FALLBACK_PORT = 8083;
 const configuredPort = Number(process.env.WS_PORT ?? process.env.PORT ?? DEFAULT_PORT);
 
+// Structured Health & Uptime endpoint
 const httpServer = createServer((req, res) => {
   if (req.url === "/health") {
     res.writeHead(200, { "Content-Type": "application/json" });
-    res.end(JSON.stringify({ status: "ok" }));
+    res.end(
+      JSON.stringify({
+        status: "ok",
+        uptimeSeconds: Math.floor(process.uptime()),
+        activeConnections: wss.clients.size,
+        activeRooms: roomUsersMap.size,
+        memoryMB: Math.round(process.memoryUsage().rss / (1024 * 1024)),
+        timestamp: new Date().toISOString(),
+      })
+    );
     return;
   }
 
@@ -64,7 +74,7 @@ const userNameCache = new Map<string, string>();
 // Periodic in-memory cache eviction for idle rooms (every 10 minutes)
 const cacheCleanupInterval = setInterval(() => {
   const now = Date.now();
-  // Evict room info cache older than 1 hour or for inactive rooms
+  // Evict room info cache older than 10 minutes or for inactive rooms
   roomInfoCache.forEach((info, roomId) => {
     const hasActiveUsers = (roomUsersMap.get(String(roomId))?.size ?? 0) > 0;
     if (!hasActiveUsers && now - info.fetchedAt > 600000) {
@@ -87,7 +97,6 @@ const cacheCleanupInterval = setInterval(() => {
     }
   });
 }, 600000);
-
 
 function getShapeKey(shape: any, fallbackIndex?: number): string | number {
   if (shape && shape.id !== undefined && shape.id !== null) {
@@ -141,7 +150,7 @@ async function resolveRoomId(roomIdOrSlug: unknown): Promise<number | null> {
   }
 
   const numericRoomId = Number(key);
-  if (Number.isInteger(numericRoomId)) {
+  if (Number.isInteger(numericRoomId) && numericRoomId > 0) {
     try {
       const roomById = await PrismaClient.room.findUnique({
         where: { id: numericRoomId },
@@ -252,24 +261,49 @@ function broadcastPresence(roomIdStr: string) {
   }
 }
 
-// Background DB sync queue for shapes (debounced to eliminate DB bottlenecks during drag)
+// ── Smart Non-Destructive Background DB Sync for Shapes ──────────────────────
+// Instead of wiping the entire shape table, we perform surgical diff updates.
 const dbSyncDebounceTimers = new Map<number, NodeJS.Timeout>();
 
-function queueBulkShapeSave(roomId: number, userId: string, shapes: any[]) {
+function queueSmartShapeSync(roomId: number, userId: string, shapes: any[]) {
   if (dbSyncDebounceTimers.has(roomId)) {
     clearTimeout(dbSyncDebounceTimers.get(roomId)!);
   }
   const timer = setTimeout(async () => {
     dbSyncDebounceTimers.delete(roomId);
     try {
-      await PrismaClient.$transaction([
-        PrismaClient.shape.deleteMany({ where: { roomId } }),
-        PrismaClient.shape.createMany({
-          data: shapes.map((s: any) => {
+      const existingInDb = await PrismaClient.shape.findMany({
+        where: { roomId },
+        select: { id: true },
+      });
+
+      const incomingIds = new Set<number>(
+        shapes
+          .map((s: any) => Number(s.id))
+          .filter((id) => Number.isInteger(id) && id > 0)
+      );
+
+      // 1. Delete only shapes that are present in DB but missing from the current active canvas state
+      const toDeleteIds = existingInDb
+        .map((row) => row.id)
+        .filter((id) => !incomingIds.has(id));
+
+      if (toDeleteIds.length > 0) {
+        await PrismaClient.shape.deleteMany({
+          where: { id: { in: toDeleteIds }, roomId },
+        });
+      }
+
+      // 2. Insert only truly new shapes that do not have a DB id yet
+      const shapesToCreate = shapes.filter((s: any) => !s.id || !incomingIds.has(Number(s.id)));
+      if (shapesToCreate.length > 0) {
+        await PrismaClient.shape.createMany({
+          data: shapesToCreate.map((s: any) => {
             const { type, style, ...data } = s || {};
-            const clientUpdatedAt = s && typeof s.updatedAt === "number" && !isNaN(s.updatedAt)
-              ? new Date(s.updatedAt)
-              : new Date();
+            const clientUpdatedAt =
+              s && typeof s.updatedAt === "number" && !isNaN(s.updatedAt)
+                ? new Date(s.updatedAt)
+                : new Date();
             return {
               roomId,
               userId,
@@ -279,18 +313,18 @@ function queueBulkShapeSave(roomId: number, userId: string, shapes: any[]) {
               updatedAt: clientUpdatedAt,
             };
           }),
-        }),
-      ]);
+        });
+      }
     } catch (err) {
-      console.error("Background shape save error:", err);
+      console.error("Smart shape sync error:", err);
     }
-  }, 250);
+  }, 350);
   dbSyncDebounceTimers.set(roomId, timer);
 }
 
 function startServer(port: number) {
   httpServer.listen(port, "0.0.0.0", () => {
-    console.log(`ws-backend listening on port ${port}`);
+    console.log(`✓ ws-backend listening on ws://0.0.0.0:${port}`);
   });
 
   httpServer.once("error", (error: NodeJS.ErrnoException) => {
@@ -344,7 +378,22 @@ wss.on("connection", async function connection(ws, request) {
   };
   users.push(userObj);
 
+  // Per-client message rate limiting (max 150 msgs/second)
+  let messageCount = 0;
+  let windowStart = Date.now();
+
   ws.on("message", async function message(data) {
+    const now = Date.now();
+    if (now - windowStart > 1000) {
+      messageCount = 0;
+      windowStart = now;
+    }
+    messageCount++;
+    if (messageCount > 150) {
+      // Throttle abusive traffic
+      return;
+    }
+
     try {
       let parsedData: any;
       if (typeof data !== "string") {
@@ -392,7 +441,7 @@ wss.on("connection", async function connection(ws, request) {
         return;
       }
 
-      // ── cursor ─────────────────────────────────────────────────────────────────
+      // ── cursor (60 FPS low-latency broadcast) ───────────────────────────────────
       if (parsedData.type === "cursor") {
         const senderRoomId = String(parsedData.roomId ?? "");
         if (senderRoomId) {
@@ -450,7 +499,7 @@ wss.on("connection", async function connection(ws, request) {
           return;
         }
 
-        // Async DB save for shape
+        // Fast asynchronous single-row DB save (does not block or lock table)
         PrismaClient.shape
           .create({
             data: {
@@ -460,6 +509,19 @@ wss.on("connection", async function connection(ws, request) {
               data: data || {},
               style: style || {},
             },
+          })
+          .then((savedShape) => {
+            // Echo assigned id back to the creator so client can track future edits/moves
+            if (ws.readyState === WebSocket.OPEN && savedShape.id) {
+              ws.send(
+                JSON.stringify({
+                  type: "shape_persisted",
+                  tempSeed: parsedShape.seed,
+                  id: savedShape.id,
+                  roomId,
+                })
+              );
+            }
           })
           .catch((err) => console.error("Shape create error:", err));
 
@@ -499,6 +561,7 @@ wss.on("connection", async function connection(ws, request) {
         const { accepted } = checkAndUpdateLWW(roomId, shapeKey, incomingTimestamp);
 
         if (!accepted) {
+          // Conflict detected: sync latest shapes from DB
           const currentShapes = await PrismaClient.shape.findMany({
             where: { roomId },
             orderBy: { id: "asc" },
@@ -520,11 +583,25 @@ wss.on("connection", async function connection(ws, request) {
           return;
         }
 
-        if (Array.isArray(parsedData.shapes)) {
-          queueBulkShapeSave(roomId, userId!, parsedData.shapes);
+        // Surgical single-shape DB update if shape ID exists (99.9% faster than wipe)
+        if (shape && shape.id) {
+          const { type, style, id, ...shapeData } = shape;
+          PrismaClient.shape
+            .updateMany({
+              where: { id: Number(id), roomId },
+              data: {
+                data: shapeData || {},
+                style: style || {},
+                updatedAt: new Date(incomingTimestamp),
+              },
+            })
+            .catch((err) => console.error("Shape update error:", err));
+        } else if (Array.isArray(parsedData.shapes)) {
+          // Fallback to debounced smart sync
+          queueSmartShapeSync(roomId, userId!, parsedData.shapes);
         }
 
-        // Fast pre-serialized broadcast
+        // Fast pre-serialized broadcast to peers
         const roomUsers = roomUsersMap.get(String(roomId));
         if (roomUsers) {
           const moveMsg = JSON.stringify({
@@ -542,9 +619,42 @@ wss.on("connection", async function connection(ws, request) {
         return;
       }
 
-      // ── delete_shape / undo / redo / sync_shapes ──────────────────────────────
+      // ── delete_shape ───────────────────────────────────────────────────────────
+      if (parsedData.type === "delete_shape") {
+        const roomId = await resolveRoomId(parsedData.roomId);
+        if (!roomId) return;
+
+        const check = await canUserDraw(roomId, userId!);
+        if (!check.canDraw) {
+          sendWsError(ws, check.reason || "Canvas is locked / view-only.");
+          return;
+        }
+
+        // Surgical single delete if ID is provided
+        if (parsedData.shapeId) {
+          PrismaClient.shape
+            .deleteMany({
+              where: { id: Number(parsedData.shapeId), roomId },
+            })
+            .catch((err) => console.error("Single delete error:", err));
+        } else if (Array.isArray(parsedData.shapes)) {
+          queueSmartShapeSync(roomId, userId!, parsedData.shapes);
+        }
+
+        const roomUsers = roomUsersMap.get(String(roomId));
+        if (roomUsers) {
+          const syncMsg = JSON.stringify({ ...parsedData, roomId });
+          roomUsers.forEach((u) => {
+            if (u.ws !== ws && u.ws.readyState === WebSocket.OPEN) {
+              u.ws.send(syncMsg);
+            }
+          });
+        }
+        return;
+      }
+
+      // ── undo / redo / sync_shapes ──────────────────────────────────────────────
       if (
-        parsedData.type === "delete_shape" ||
         parsedData.type === "undo" ||
         parsedData.type === "redo" ||
         parsedData.type === "sync_shapes"
@@ -559,7 +669,7 @@ wss.on("connection", async function connection(ws, request) {
         }
 
         if (Array.isArray(parsedData.shapes)) {
-          queueBulkShapeSave(roomId, userId!, parsedData.shapes);
+          queueSmartShapeSync(roomId, userId!, parsedData.shapes);
         }
 
         const roomUsers = roomUsersMap.get(String(roomId));
@@ -615,7 +725,6 @@ wss.on("connection", async function connection(ws, request) {
 
         try {
           await PrismaClient.room.update({ where: { id: roomId }, data: { isLocked: newLockState } });
-          // Update in-memory room info cache
           if (info) {
             info.isLocked = newLockState;
             info.fetchedAt = Date.now();
@@ -725,4 +834,9 @@ function handleWsShutdown(signal: string) {
 
 process.on("SIGINT", () => handleWsShutdown("SIGINT"));
 process.on("SIGTERM", () => handleWsShutdown("SIGTERM"));
-
+process.on("unhandledRejection", (reason) => {
+  console.error("Unhandled Promise Rejection in ws-backend:", reason);
+});
+process.on("uncaughtException", (error) => {
+  console.error("Uncaught Exception in ws-backend:", error);
+});

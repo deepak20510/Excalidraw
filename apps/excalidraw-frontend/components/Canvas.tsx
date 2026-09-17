@@ -87,6 +87,7 @@ export function Canvas({
   initialShapes?: Shape[] | Promise<Shape[]>;
 }) {
   const canvasRef = useRef<HTMLCanvasElement>(null);
+  const overlayCanvasRef = useRef<HTMLCanvasElement>(null);
   const minimapRef = useRef<HTMLCanvasElement>(null);
   const [game, setGame] = useState<Game>();
   const [selectedTool, setSelectedTool] = useState<Tool>("rect");
@@ -135,9 +136,23 @@ export function Canvas({
         socket,
         userId ?? "",
         userName ?? "User",
-        initialShapes
+        initialShapes,
+        overlayCanvasRef.current,
       );
       setGame(g);
+
+      const handleResize = () => {
+        if (canvasRef.current && overlayCanvasRef.current) {
+          canvasRef.current.width = window.innerWidth;
+          canvasRef.current.height = window.innerHeight;
+          overlayCanvasRef.current.width = window.innerWidth;
+          overlayCanvasRef.current.height = window.innerHeight;
+          g.updateCanvasRect();
+          g.requestRender();
+          g.requestOverlayRender();
+        }
+      };
+      window.addEventListener("resize", handleResize);
 
       if (minimapRef.current) {
         g.registerMinimap(minimapRef.current);
@@ -148,6 +163,7 @@ export function Canvas({
       });
 
       return () => {
+        window.removeEventListener("resize", handleResize);
         g.destroy();
       };
     }
@@ -362,11 +378,19 @@ export function Canvas({
 
   return (
     <div className="h-screen w-screen overflow-hidden relative bg-[#09090b] select-none font-sans">
+      {/* Base Layer: Committed RoughJS Shapes & Canvas Background */}
       <canvas
         ref={canvasRef}
         width={typeof window !== "undefined" ? window.innerWidth : 1280}
         height={typeof window !== "undefined" ? window.innerHeight : 720}
-        className="block w-full h-full touch-none"
+        className="absolute inset-0 block w-full h-full touch-none"
+      />
+      {/* Top Layer: 60+ FPS Scratchpad Overlay for Previews & Remote Cursors */}
+      <canvas
+        ref={overlayCanvasRef}
+        width={typeof window !== "undefined" ? window.innerWidth : 1280}
+        height={typeof window !== "undefined" ? window.innerHeight : 720}
+        className="absolute inset-0 block w-full h-full pointer-events-none touch-none"
       />
 
       {/* View-Only / Locked overlay banner */}

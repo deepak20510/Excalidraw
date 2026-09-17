@@ -15,7 +15,10 @@
     "start:ws": "pnpm --filter ws-backend start",
     "migrate:db": "pnpm --filter @repo/db exec prisma migrate deploy",
     "generate:db": "pnpm --filter @repo/db exec prisma generate",
-    "postinstall": "pnpm generate:db"
+    "postinstall": "pnpm generate:db",
+    "clean": "node -e \"const fs = require('fs'); ['.turbo', 'apps/excalidraw-frontend/.next', 'apps/excalidraw-frontend/.turbo', 'apps/http-backend/dist', 'apps/ws-backend/dist'].forEach(p => { if (fs.existsSync(p)) { fs.rmSync(p, { recursive: true, force: true }); console.log('Cleaned ' + p); } });\"",
+    "test:load": "node scripts/simulate-load.js",
+    "backup": "node scripts/backup-restore.js"
   },
   "dependencies": {
     "prisma": "^7.8.0",

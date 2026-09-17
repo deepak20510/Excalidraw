@@ -189,13 +189,16 @@ export class Game {
   private cursorColorMap: Map<string, string> = new Map();
   private cursorColorIndex = 0;
   private lastCursorBroadcast = 0;
-  private readonly CURSOR_THROTTLE_MS = 33; // ~30 fps
+  private readonly CURSOR_THROTTLE_MS = 16; // 60 fps broadcast
   private readonly CURSOR_EXPIRY_MS = 5000; // remove after 5s of inactivity
   private userId: string;
   private userName: string;
 
-  // High performance rAF render loop + RoughJS drawable caching
+  // High performance Dual-Layer rAF render loop + RoughJS drawable caching
   private isRenderRequested = false;
+  private isOverlayRenderRequested = false;
+  private overlayCanvas: HTMLCanvasElement | null = null;
+  private overlayCtx: CanvasRenderingContext2D | null = null;
   private animationFrameId: number | null = null;
   private isDestroyed = false;
   private roughGenerator: any = null;
@@ -223,9 +226,14 @@ export class Game {
     userId = "",
     userName = "User",
     initialShapes?: Shape[] | Promise<Shape[]>,
+    overlayCanvas?: HTMLCanvasElement | null,
   ) {
     this.canvas = canvas;
     this.ctx = (canvas.getContext("2d", { alpha: false, desynchronized: true }) || canvas.getContext("2d"))!;
+    if (overlayCanvas) {
+      this.overlayCanvas = overlayCanvas;
+      this.overlayCtx = overlayCanvas.getContext("2d");
+    }
     this.roughCanvas = rough.canvas(canvas);
     this.roughGenerator = rough.generator();
     this.existingShapes = [];
@@ -269,12 +277,20 @@ export class Game {
     this.isRenderRequested = true;
   }
 
+  public requestOverlayRender() {
+    this.isOverlayRenderRequested = true;
+  }
+
   private startRenderLoop() {
     const loop = () => {
       if (this.isDestroyed) return;
       if (this.isRenderRequested) {
         this.isRenderRequested = false;
         this.renderCanvas();
+      }
+      if (this.overlayCanvas && (this.isOverlayRenderRequested || this.previewShape || this.previewPencilPoints.length > 0 || this.remoteCursors.size > 0)) {
+        this.isOverlayRenderRequested = false;
+        this.renderOverlay();
       }
       this.animationFrameId = requestAnimationFrame(loop);
     };
@@ -542,8 +558,12 @@ export class Game {
             this.remoteCursors.delete(key);
           }
         });
-        // Redraw so the cursor appears immediately
-        this.clearCanvas();
+        // Fast 60fps overlay update without redrawing static shapes
+        if (this.overlayCanvas) {
+          this.requestOverlayRender();
+        } else {
+          this.clearCanvas();
+        }
         return;
       }
       if (message.type === "chat") {
@@ -845,32 +865,32 @@ export class Game {
   }
 
   /** Draw a pencil shape using quadratic curves for smoothness */
-  private drawPencilShape(points: { x: number; y: number }[]) {
+  private drawPencilShape(points: { x: number; y: number }[], targetCtx: CanvasRenderingContext2D = this.ctx) {
     if (points.length < 2) return;
 
-    this.ctx.save();
-    this.ctx.lineCap = "round";
-    this.ctx.lineJoin = "round";
-    this.ctx.beginPath();
-    this.ctx.moveTo(points[0]!.x, points[0]!.y);
+    targetCtx.save();
+    targetCtx.lineCap = "round";
+    targetCtx.lineJoin = "round";
+    targetCtx.beginPath();
+    targetCtx.moveTo(points[0]!.x, points[0]!.y);
 
     if (points.length === 2) {
-      this.ctx.lineTo(points[1]!.x, points[1]!.y);
+      targetCtx.lineTo(points[1]!.x, points[1]!.y);
     } else {
       // Use quadratic curves through midpoints for smoothness
       for (let i = 1; i < points.length - 1; i++) {
         const midX = (points[i]!.x + points[i + 1]!.x) / 2;
         const midY = (points[i]!.y + points[i + 1]!.y) / 2;
-        this.ctx.quadraticCurveTo(points[i]!.x, points[i]!.y, midX, midY);
+        targetCtx.quadraticCurveTo(points[i]!.x, points[i]!.y, midX, midY);
       }
       // Draw the last segment
       const last = points[points.length - 1]!;
       const secondLast = points[points.length - 2]!;
-      this.ctx.quadraticCurveTo(secondLast.x, secondLast.y, last.x, last.y);
+      targetCtx.quadraticCurveTo(secondLast.x, secondLast.y, last.x, last.y);
     }
 
-    this.ctx.stroke();
-    this.ctx.restore();
+    targetCtx.stroke();
+    targetCtx.restore();
   }
 
   /** Draw an arrowhead at (tipX, tipY) pointing from (fromX, fromY) */
@@ -879,26 +899,27 @@ export class Game {
     fromY: number,
     tipX: number,
     tipY: number,
+    targetCtx: CanvasRenderingContext2D = this.ctx,
   ) {
     const headLength = 12 / this.scale;
     const angle = Math.atan2(tipY - fromY, tipX - fromX);
-    this.ctx.beginPath();
-    this.ctx.moveTo(tipX, tipY);
-    this.ctx.lineTo(
+    targetCtx.beginPath();
+    targetCtx.moveTo(tipX, tipY);
+    targetCtx.lineTo(
       tipX - headLength * Math.cos(angle - Math.PI / 6),
       tipY - headLength * Math.sin(angle - Math.PI / 6),
     );
-    this.ctx.moveTo(tipX, tipY);
-    this.ctx.lineTo(
+    targetCtx.moveTo(tipX, tipY);
+    targetCtx.lineTo(
       tipX - headLength * Math.cos(angle + Math.PI / 6),
       tipY - headLength * Math.sin(angle + Math.PI / 6),
     );
-    this.ctx.stroke();
+    targetCtx.stroke();
   }
 
-  /** Draw all remote cursors in screen space (called after world-space shapes are drawn) */
-  private drawRemoteCursors() {
-    const ctx = this.ctx;
+  /** Draw all remote cursors in screen space */
+  private drawRemoteCursors(targetCtx: CanvasRenderingContext2D = this.ctx) {
+    const ctx = targetCtx;
     // Reset to screen space
     ctx.save();
     ctx.setTransform(1, 0, 0, 1, 0, 0);
@@ -1275,8 +1296,8 @@ export class Game {
 
     this.ctx.restore();
 
-    // Draw the live in-progress preview shape (if any)
-    if (this.previewShape || this.previewPencilPoints.length > 1) {
+    // Draw the live in-progress preview shape (only if overlayCanvas is NOT enabled)
+    if (!this.overlayCanvas && (this.previewShape || this.previewPencilPoints.length > 1)) {
       this.ctx.save();
       this.ctx.setTransform(
         this.scale,
@@ -1349,8 +1370,91 @@ export class Game {
     // Draw the minimap after every canvas redraw
     this.drawMinimap();
 
-    // Draw remote cursors in screen space (always on top)
-    this.drawRemoteCursors();
+    // Draw remote cursors in screen space (only if overlayCanvas is NOT enabled)
+    if (!this.overlayCanvas) {
+      this.drawRemoteCursors();
+    }
+  }
+
+  /** Ultra high performance overlay rendering for 60+ FPS preview & cursors */
+  public renderOverlay() {
+    if (!this.overlayCtx || !this.overlayCanvas) return;
+    const ctx = this.overlayCtx;
+    ctx.clearRect(0, 0, this.overlayCanvas.width, this.overlayCanvas.height);
+
+    // 1. Draw live preview shape on overlay canvas
+    if (this.previewShape || this.previewPencilPoints.length > 1) {
+      ctx.save();
+      ctx.setTransform(
+        this.scale,
+        0,
+        0,
+        this.scale,
+        -this.panX * this.scale,
+        -this.panY * this.scale,
+      );
+
+      const previewStyle = this.activeStyle;
+      ctx.strokeStyle = previewStyle.strokeColor;
+      ctx.lineWidth = previewStyle.strokeWidth / this.scale;
+      ctx.globalAlpha = previewStyle.opacity;
+      if (previewStyle.strokeStyle === "dashed") {
+        ctx.setLineDash([10 / this.scale, 5 / this.scale]);
+      } else if (previewStyle.strokeStyle === "dotted") {
+        ctx.setLineDash([2 / this.scale, 4 / this.scale]);
+      } else {
+        ctx.setLineDash([]);
+      }
+      ctx.fillStyle = previewStyle.fillColor;
+
+      const ps = this.previewShape;
+      if (ps?.type === "rect") {
+        if (previewStyle.fillColor !== "transparent") {
+          ctx.fillRect(ps.x, ps.y, ps.width, ps.height);
+        }
+        ctx.strokeRect(ps.x, ps.y, ps.width, ps.height);
+      } else if (ps?.type === "diamond") {
+        const cx = ps.x + ps.width / 2;
+        const cy = ps.y + ps.height / 2;
+        ctx.beginPath();
+        ctx.moveTo(cx, ps.y);
+        ctx.lineTo(ps.x + ps.width, cy);
+        ctx.lineTo(cx, ps.y + ps.height);
+        ctx.lineTo(ps.x, cy);
+        ctx.closePath();
+        if (previewStyle.fillColor !== "transparent") ctx.fill();
+        ctx.stroke();
+      } else if (ps?.type === "circle") {
+        if (previewStyle.fillColor !== "transparent") {
+          ctx.beginPath();
+          ctx.arc(ps.centerX, ps.centerY, Math.abs(ps.radius), 0, Math.PI * 2);
+          ctx.fill();
+          ctx.closePath();
+        }
+        ctx.beginPath();
+        ctx.arc(ps.centerX, ps.centerY, Math.abs(ps.radius), 0, Math.PI * 2);
+        ctx.stroke();
+        ctx.closePath();
+      } else if (ps?.type === "line") {
+        ctx.beginPath();
+        ctx.moveTo(ps.x1, ps.y1);
+        ctx.lineTo(ps.x2, ps.y2);
+        ctx.stroke();
+      } else if (ps?.type === "arrow") {
+        ctx.beginPath();
+        ctx.moveTo(ps.x1, ps.y1);
+        ctx.lineTo(ps.x2, ps.y2);
+        ctx.stroke();
+        this.drawArrowhead(ps.x1, ps.y1, ps.x2, ps.y2, ctx);
+      } else if (this.previewPencilPoints.length > 1) {
+        this.drawPencilShape(this.previewPencilPoints, ctx);
+      }
+
+      ctx.restore();
+    }
+
+    // 2. Draw remote cursors at 60 FPS without redrawing static shapes
+    this.drawRemoteCursors(ctx);
   }
 
   /** Register a minimap canvas element and attach its interaction handlers */
@@ -1988,6 +2092,9 @@ export class Game {
     );
 
     this.clearCanvas();
+    if (this.overlayCanvas) {
+      this.requestOverlayRender();
+    }
   };
 
   /** Broadcast the local cursor position (throttled to ~30fps) */
@@ -2127,8 +2234,12 @@ export class Game {
       };
     }
 
-    // Request a render — the preview will be drawn inside renderCanvas()
-    this.requestRender();
+    // Request a render — preview drawn at 60+ FPS on overlay canvas
+    if (this.overlayCanvas) {
+      this.requestOverlayRender();
+    } else {
+      this.requestRender();
+    }
   };
 
   createTextShapeAt = (clientX: number, clientY: number) => {

@@ -28,6 +28,8 @@ model Room {
   admin     User         @relation(fields: [adminId], references: [id])
   shapes    Shape[]
   members   RoomMember[]
+
+  @@index([adminId])
 }
 
 model RoomMember {
@@ -56,5 +58,7 @@ model Shape {
   user      User     @relation(fields: [userId], references: [id])
 
   @@index([roomId])
+  @@index([roomId, id])
+  @@index([roomId, updatedAt])
 }
 

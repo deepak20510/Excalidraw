@@ -7,12 +7,18 @@ type ChatMessage = {
 };
 
 type ChatsResponse = {
-  messages: ChatMessage[];
+  shapes?: Shape[];
+  messages?: ChatMessage[];
 };
 
 type ShapeMessage = {
   shape: Shape;
 };
+
+// Create resilient Axios client with 8-second timeout
+const httpClient = axios.create({
+  timeout: 8000,
+});
 
 function isShape(value: unknown): value is Shape {
   if (typeof value !== "object" || value === null || !("type" in value)) {
@@ -104,9 +110,38 @@ function parseShapeMessage(value: unknown): Shape | null {
   }
 }
 
-// In-flight promise cache to deduplicate parallel requests (e.g. RoomCanvas prefetch + Game init)
+// In-flight promise cache to deduplicate parallel requests
 const inFlightShapeRequests = new Map<string, Promise<Shape[]>>();
-const shapeCache = new Map<string, { shapes: Shape[]; timestamp: number }>();
+const shapeCache = new Map<string, { shapes: Shape[]; etag?: string; timestamp: number }>();
+
+async function fetchWithRetry(url: string, etag?: string, retries = 2): Promise<{ data: ChatsResponse; notModified?: boolean; etag?: string }> {
+  for (let attempt = 0; attempt <= retries; attempt++) {
+    try {
+      const headers: Record<string, string> = {};
+      if (etag) {
+        headers["If-None-Match"] = etag;
+      }
+      const res = await httpClient.get<ChatsResponse>(url, {
+        headers,
+        validateStatus: (status) => (status >= 200 && status < 300) || status === 304,
+      });
+
+      if (res.status === 304) {
+        return { data: {}, notModified: true };
+      }
+
+      return {
+        data: res.data,
+        etag: res.headers.etag,
+      };
+    } catch (err: any) {
+      if (attempt === retries) throw err;
+      // Exponential backoff wait: 300ms, 600ms
+      await new Promise((r) => setTimeout(r, 300 * (attempt + 1)));
+    }
+  }
+  throw new Error("Failed to fetch after retries");
+}
 
 export async function getExistingShapes(roomId: string, forceRefresh = false): Promise<Shape[]> {
   if (!roomId || Number.isNaN(Number(roomId))) {
@@ -115,11 +150,9 @@ export async function getExistingShapes(roomId: string, forceRefresh = false): P
   }
 
   const now = Date.now();
-  if (!forceRefresh) {
-    const cached = shapeCache.get(roomId);
-    if (cached && now - cached.timestamp < 3000) {
-      return cached.shapes;
-    }
+  const cached = shapeCache.get(roomId);
+  if (!forceRefresh && cached && now - cached.timestamp < 2500) {
+    return cached.shapes;
   }
 
   const existingInFlight = inFlightShapeRequests.get(roomId);
@@ -129,19 +162,35 @@ export async function getExistingShapes(roomId: string, forceRefresh = false): P
 
   const fetchPromise = (async () => {
     try {
-      const res = await axios.get<ChatsResponse>(
+      const { data, notModified, etag } = await fetchWithRetry(
         `${HTTP_BACKEND}/chats/${roomId}`,
+        cached?.etag
       );
-      const messages = res.data.messages || [];
+
+      // If 304 Not Modified, use cached shapes instantly
+      if (notModified && cached) {
+        cached.timestamp = Date.now();
+        return cached.shapes;
+      }
+
+      // Fast path: Server returned direct shapes array
+      if (Array.isArray(data.shapes) && data.shapes.length > 0) {
+        const validShapes = data.shapes.filter(isShape);
+        shapeCache.set(roomId, { shapes: validShapes, etag, timestamp: Date.now() });
+        return validShapes;
+      }
+
+      // Legacy fallback: Server returned stringified messages array
+      const messages = data.messages || [];
       const shapes = messages
         .map((x) => parseShapeMessage(x.message))
         .filter((shape): shape is Shape => shape !== null);
 
-      shapeCache.set(roomId, { shapes, timestamp: Date.now() });
+      shapeCache.set(roomId, { shapes, etag, timestamp: Date.now() });
       return shapes;
-    } catch (e) {
-      console.error("Failed to fetch existing shapes:", e);
-      return [];
+    } catch (e: any) {
+      console.warn("Failed to fetch existing shapes, using cached or empty fallback:", e?.message || e);
+      return cached?.shapes || [];
     } finally {
       inFlightShapeRequests.delete(roomId);
     }
