@@ -121,13 +121,22 @@ export interface RemoteCursor {
   lastSeen: number; // Date.now()
 }
 
+type InteractionKind =
+  | { kind: "idle" }
+  | { kind: "drawing" }
+  | { kind: "panning"; cause: "hand" | "space" | "middle" }
+  | { kind: "dragging" }
+  | { kind: "erasing"; erasedAny: boolean };
+
+type TouchKind = "idle" | "touching" | "pinching";
+
 export class Game {
   private canvas: HTMLCanvasElement;
   private ctx: CanvasRenderingContext2D;
   private roughCanvas: ReturnType<typeof rough.canvas> | null = null;
   private existingShapes: Shape[];
   private roomId: string;
-  private clicked: boolean;
+  private interaction: InteractionKind = { kind: "idle" };
   private startX = 0;
   private startY = 0;
   private selectedTool: Tool = "circle";
@@ -135,13 +144,8 @@ export class Game {
 
   // Selection + Drag state
   private selectedShapeIndex: number | null = null;
-  private isDragging = false;
   private dragOffsetX = 0;
   private dragOffsetY = 0;
-
-  // Eraser drag state
-  private isErasing = false;
-  private erasedDuringDrag = false;
 
   // Active Style state (for new shapes), Selection callback, Zoom callback, and Tool callback
   public onSelectionChange?: (selectedShape: Shape | null) => void;
@@ -160,7 +164,6 @@ export class Game {
   private panX = 0;
   private panY = 0;
   private scale = 1;
-  private isPanning = false;
   private spacePressed = false;
   private lastPanX = 0;
   private lastPanY = 0;
@@ -178,8 +181,7 @@ export class Game {
   // Touch tracking state
   private lastTouchX = 0;
   private lastTouchY = 0;
-  private isTouching = false;
-  private isPinching = false;
+  private touchKind: TouchKind = "idle";
   private initialTouchDistance = 0;
   private initialScale = 1;
   private lastTouchCenter: { x: number; y: number } | null = null;
@@ -241,7 +243,6 @@ export class Game {
     this.socket = socket;
     this.userId = userId;
     this.userName = userName;
-    this.clicked = false;
     this.updateCanvasRect();
 
     if (Array.isArray(initialShapes)) {
@@ -1486,8 +1487,8 @@ export class Game {
   private drawMinimap(force = false) {
     if (!this.minimapCanvas || !this.minimapCtx) return;
 
-    // During active interaction (drawing, dragging, panning), throttle minimap to 250ms
-    const isInteracting = this.clicked || this.isDragging || this.isPanning || this.isErasing;
+    // During active interaction (drawing, dragging, panning, erasing), throttle minimap to 250ms
+    const isInteracting = this.interaction.kind !== "idle";
     const minInterval = isInteracting ? 250 : 100;
 
     const now = Date.now();
@@ -1760,7 +1761,7 @@ export class Game {
 
     if (e.code === "Space") {
       this.spacePressed = false;
-      if (!this.isPanning) {
+      if (this.interaction.kind !== "panning") {
         this.canvas.style.cursor = "default";
       }
     }
@@ -1869,7 +1870,9 @@ export class Game {
     if (hitIndex !== null) {
       const deletedShape = this.existingShapes[hitIndex]!;
       this.existingShapes.splice(hitIndex, 1);
-      this.erasedDuringDrag = true;
+      if (this.interaction.kind === "erasing") {
+        this.interaction = { kind: "erasing", erasedAny: true };
+      }
       this.socket.send(
         JSON.stringify({
           type: "delete_shape",
@@ -1890,7 +1893,8 @@ export class Game {
 
     // Middle mouse button (button === 1), space held, OR Hand (Pan) tool: start panning canvas
     if (e.button === 1 || this.spacePressed || this.selectedTool === "hand") {
-      this.isPanning = true;
+      const cause = e.button === 1 ? "middle" : this.spacePressed ? "space" : "hand";
+      this.interaction = { kind: "panning", cause };
       this.lastPanX = e.clientX;
       this.lastPanY = e.clientY;
       this.canvas.style.cursor = "grabbing";
@@ -1906,7 +1910,7 @@ export class Game {
       if (hitIndex !== null) {
         this.selectedShapeIndex = hitIndex;
         this.triggerSelectionCallback();
-        this.isDragging = true;
+        this.interaction = { kind: "dragging" };
         // Store offset from click to shape origin for smooth dragging
         const shape = this.existingShapes[hitIndex]!;
         const bounds = this.getShapeBounds(shape);
@@ -1916,7 +1920,7 @@ export class Game {
       } else {
         this.selectedShapeIndex = null;
         this.triggerSelectionCallback();
-        this.isDragging = false;
+        this.interaction = { kind: "idle" };
         this.canvas.style.cursor = "default";
       }
       this.clearCanvas();
@@ -1925,8 +1929,7 @@ export class Game {
 
     // Eraser tool: start erasing (works on click and drag)
     if (this.selectedTool === "eraser") {
-      this.isErasing = true;
-      this.erasedDuringDrag = false;
+      this.interaction = { kind: "erasing", erasedAny: false };
       this.eraseShapeAt(world.x, world.y);
       return;
     }
@@ -1938,7 +1941,7 @@ export class Game {
     }
 
     // Normal drawing
-    this.clicked = true;
+    this.interaction = { kind: "drawing" };
     this.startX = world.x;
     this.startY = world.y;
 
@@ -1950,24 +1953,29 @@ export class Game {
 
   mouseUpHandler = (e: MouseEvent) => {
     // End erasing drag — push one history entry for the whole drag
-    if (this.isErasing) {
-      this.isErasing = false;
-      if (this.erasedDuringDrag) {
+    if (this.interaction.kind === "erasing") {
+      const erasedAny = this.interaction.erasedAny;
+      this.interaction = { kind: "idle" };
+      if (erasedAny) {
         this.pushHistory();
       }
       return;
     }
 
     // End panning
-    if (this.isPanning) {
-      this.isPanning = false;
-      this.canvas.style.cursor = (this.spacePressed || this.selectedTool === "hand") ? "grab" : "default";
+    if (this.interaction.kind === "panning") {
+      const cause = this.interaction.cause;
+      this.interaction = { kind: "idle" };
+      this.canvas.style.cursor =
+        this.spacePressed || this.selectedTool === "hand" || cause === "space" || cause === "hand"
+          ? "grab"
+          : "default";
       return;
     }
 
     // End dragging a selected shape
-    if (this.isDragging) {
-      this.isDragging = false;
+    if (this.interaction.kind === "dragging") {
+      this.interaction = { kind: "idle" };
       this.canvas.style.cursor = this.selectedTool === "select" ? "grab" : "default";
       this.pushHistory();
       // Broadcast the moved shape with timestamp for LWW conflict resolution
@@ -1989,8 +1997,8 @@ export class Game {
       return;
     }
 
-    if (!this.clicked) return;
-    this.clicked = false;
+    if (this.interaction.kind !== "drawing") return;
+    this.interaction = { kind: "idle" };
 
     // Clear the live preview now that drawing is complete
     this.previewShape = null;
@@ -2123,7 +2131,7 @@ export class Game {
     this.broadcastCursor(screenX, screenY);
 
     // Handle panning
-    if (this.isPanning) {
+    if (this.interaction.kind === "panning") {
       const dx = e.clientX - this.lastPanX;
       const dy = e.clientY - this.lastPanY;
       this.panX -= dx / this.scale;
@@ -2134,9 +2142,8 @@ export class Game {
       return;
     }
 
-    // Handle dragging a selected shape (checked before `clicked` because
-    // the select-tool mousedown sets isDragging but NOT clicked)
-    if (this.isDragging && this.selectedShapeIndex !== null) {
+    // Handle dragging a selected shape
+    if (this.interaction.kind === "dragging" && this.selectedShapeIndex !== null) {
       const world = this.screenToWorld(screenX, screenY);
       const shape = this.existingShapes[this.selectedShapeIndex]!;
       const bounds = this.getShapeBounds(shape);
@@ -2151,20 +2158,20 @@ export class Game {
     }
 
     // Dynamic hover cursor when using select tool over shapes
-    if (this.selectedTool === "select" && !this.isDragging) {
+    if (this.selectedTool === "select" && this.interaction.kind !== "dragging") {
       const world = this.screenToWorld(screenX, screenY);
       const hit = this.findShapeAt(world.x, world.y);
       this.canvas.style.cursor = hit !== null ? "grab" : "default";
     }
 
     // Eraser drag: erase any shape the cursor passes over
-    if (this.isErasing) {
+    if (this.interaction.kind === "erasing") {
       const world = this.screenToWorld(screenX, screenY);
       this.eraseShapeAt(world.x, world.y);
       return;
     }
 
-    if (!this.clicked) return;
+    if (this.interaction.kind !== "drawing") return;
 
     const world = this.screenToWorld(screenX, screenY);
     const currentX = world.x;
@@ -2356,8 +2363,7 @@ export class Game {
     // If there is 1 touch, treat it as a mousedown event
     if (e.touches.length === 1) {
       const touch = e.touches[0]!;
-      this.isTouching = true;
-      this.isPinching = false;
+      this.touchKind = "touching";
       this.lastTouchX = touch.clientX;
       this.lastTouchY = touch.clientY;
 
@@ -2370,7 +2376,7 @@ export class Game {
     } else if (e.touches.length === 2) {
       // Transition to pinch-to-zoom
       // 1. Cancel single touch draw/drag/pan state
-      if (this.clicked || this.isDragging || this.isPanning) {
+      if (this.interaction.kind !== "idle") {
         const mouseEvent = new MouseEvent("mouseup", {
           clientX: this.lastTouchX,
           clientY: this.lastTouchY,
@@ -2378,8 +2384,7 @@ export class Game {
         });
         this.mouseUpHandler(mouseEvent);
       }
-      this.isTouching = false;
-      this.isPinching = true;
+      this.touchKind = "pinching";
 
       const t1 = e.touches[0]!;
       const t2 = e.touches[1]!;
@@ -2397,7 +2402,7 @@ export class Game {
   };
 
   touchMoveHandler = (e: TouchEvent) => {
-    if (e.touches.length === 1 && this.isTouching) {
+    if (e.touches.length === 1 && this.touchKind === "touching") {
       const touch = e.touches[0]!;
       this.lastTouchX = touch.clientX;
       this.lastTouchY = touch.clientY;
@@ -2410,7 +2415,7 @@ export class Game {
       if (e.cancelable) {
         e.preventDefault();
       }
-    } else if (e.touches.length === 2 && this.isPinching) {
+    } else if (e.touches.length === 2 && this.touchKind === "pinching") {
       const t1 = e.touches[0]!;
       const t2 = e.touches[1]!;
 
@@ -2461,8 +2466,8 @@ export class Game {
   };
 
   touchEndHandler = (e: TouchEvent) => {
-    if (this.isTouching) {
-      this.isTouching = false;
+    if (this.touchKind === "touching") {
+      this.touchKind = "idle";
       const mouseEvent = new MouseEvent("mouseup", {
         clientX: this.lastTouchX,
         clientY: this.lastTouchY,
@@ -2471,12 +2476,11 @@ export class Game {
       this.mouseUpHandler(mouseEvent);
     }
     
-    if (this.isPinching) {
+    if (this.touchKind === "pinching") {
       // If we still have 1 finger on screen, transition back to touching
       if (e.touches.length === 1) {
-        this.isPinching = false;
+        this.touchKind = "touching";
         const touch = e.touches[0]!;
-        this.isTouching = true;
         this.lastTouchX = touch.clientX;
         this.lastTouchY = touch.clientY;
 
@@ -2487,7 +2491,7 @@ export class Game {
         });
         this.mouseDownHandler(mouseEvent);
       } else if (e.touches.length === 0) {
-        this.isPinching = false;
+        this.touchKind = "idle";
         this.lastTouchCenter = null;
       }
     }

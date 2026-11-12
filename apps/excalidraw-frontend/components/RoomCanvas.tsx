@@ -27,11 +27,15 @@ interface RoomInfo {
   isLocked: boolean;
 }
 
+type ConnectionState =
+  | { status: 'connecting'; isSlow: boolean }
+  | { status: 'connected' }
+  | { status: 'reconnecting' }
+  | { status: 'error'; message: string };
+
 export function RoomCanvas({ roomId }: { roomId: string }) {
   const [socket, setSocket] = useState<WebSocket | null>(null);
-  const [connectionStatus, setConnectionStatus] = useState<"connecting" | "connected" | "reconnecting" | "error">("connecting");
-  const [connectionError, setConnectionError] = useState("");
-  const [isSlowConnection, setIsSlowConnection] = useState(false);
+  const [conn, setConn] = useState<ConnectionState>({ status: 'connecting', isSlow: false });
   const [userId, setUserId] = useState("");
   const [userName, setUserName] = useState("User");
   const [roomInfo, setRoomInfo] = useState<RoomInfo | null>(null);
@@ -45,8 +49,7 @@ export function RoomCanvas({ roomId }: { roomId: string }) {
   useEffect(() => {
     if (!roomId || Number.isNaN(Number(roomId))) {
       console.error("Invalid roomId received by RoomCanvas:", roomId);
-      setConnectionError("Invalid room id. Please rejoin the room from the home page.");
-      setConnectionStatus("error");
+      setConn({ status: 'error', message: 'Invalid room id. Please rejoin the room from the home page.' });
       return;
     }
 
@@ -94,7 +97,7 @@ export function RoomCanvas({ roomId }: { roomId: string }) {
       .then((r) => {
         if (r.status === 403) {
           localStorage.removeItem("token");
-          setConnectionError("Session expired. Please log in again.");
+          setConn({ status: "error", message: "Session expired. Please log in again." });
           router.push("/signin");
           return null;
         }
@@ -114,7 +117,7 @@ export function RoomCanvas({ roomId }: { roomId: string }) {
 
     // Detect slow server wake-ups (Render / Fly free tier 30-50s cold start)
     const slowTimer = setTimeout(() => {
-      setIsSlowConnection(true);
+      setConn(prev => prev.status === 'connecting' ? { status: 'connecting', isSlow: true } : prev);
     }, 7000);
 
     let activeSocket: WebSocket | null = null;
@@ -136,9 +139,7 @@ export function RoomCanvas({ roomId }: { roomId: string }) {
             return;
           }
           clearTimeout(slowTimer);
-          setIsSlowConnection(false);
-          setConnectionError("");
-          setConnectionStatus("connected");
+          setConn({ status: 'connected' });
           setSocket(ws);
           reconnectDelay = 1000;
         };
@@ -148,7 +149,7 @@ export function RoomCanvas({ roomId }: { roomId: string }) {
           try {
             const data = JSON.parse(event.data);
             if (data.type === "error" && typeof data.message === "string") {
-              setConnectionError(data.message);
+              setConn({ status: "error", message: data.message });
             }
             if (data.type === "room_locked") {
               setRoomInfo((prev) => (prev ? { ...prev, isLocked: true } : prev));
@@ -163,18 +164,17 @@ export function RoomCanvas({ roomId }: { roomId: string }) {
 
         ws.onerror = () => {
           if (isCleanedUp) return;
-          setConnectionStatus("reconnecting");
+          setConn({ status: "reconnecting" });
         };
 
         ws.onclose = (event) => {
           if (isCleanedUp) return;
-          setConnectionStatus("reconnecting");
+          setConn({ status: "reconnecting" });
 
           if (event.code === 1008) {
             isCleanedUp = true;
             if (reconnectTimeoutId) clearTimeout(reconnectTimeoutId);
-            setConnectionError("Unauthorized session. Please log in again.");
-            setConnectionStatus("error");
+            setConn({ status: "error", message: "Unauthorized session. Please log in again." });
             localStorage.removeItem("token");
             router.push("/signin");
             return;
@@ -187,8 +187,7 @@ export function RoomCanvas({ roomId }: { roomId: string }) {
           reconnectDelay = Math.min(reconnectDelay * 1.5, maxReconnectDelay);
         };
       } catch (err: any) {
-        setConnectionError("Failed to initiate WebSocket connection.");
-        setConnectionStatus("error");
+        setConn({ status: "error", message: "Failed to initiate WebSocket connection." });
       }
     }
 
@@ -221,7 +220,7 @@ export function RoomCanvas({ roomId }: { roomId: string }) {
           <div>
             <h3 className="text-xl font-bold text-white tracking-tight">Joining Room #{roomId}</h3>
             <p className="text-xs text-zinc-400 mt-1.5">
-              {connectionError || "Connecting to real-time collaboration server..."}
+              {(conn.status === "error" ? conn.message : "") || "Connecting to real-time collaboration server..."}
             </p>
           </div>
 
@@ -230,7 +229,7 @@ export function RoomCanvas({ roomId }: { roomId: string }) {
             <span>Establishing live channel...</span>
           </div>
 
-          {isSlowConnection && (
+          {conn.status === "connecting" && conn.isSlow && (
             <div className="w-full bg-amber-500/10 border border-amber-500/20 p-3 rounded-xl text-left flex items-start gap-2.5 text-xs text-amber-300 animate-in fade-in duration-300">
               <AlertTriangle className="w-4 h-4 shrink-0 mt-0.5 text-amber-400" />
               <div>
@@ -269,7 +268,7 @@ export function RoomCanvas({ roomId }: { roomId: string }) {
 
   return (
     <div className="relative w-full h-full">
-      {connectionStatus === "reconnecting" && (
+      {conn.status === "reconnecting" && (
         <div className="fixed top-4 left-1/2 -translate-x-1/2 z-50 flex items-center gap-2 px-4 py-1.5 rounded-full bg-amber-500/90 text-zinc-900 font-semibold text-xs shadow-lg backdrop-blur-md animate-pulse">
           <WifiOff className="w-3.5 h-3.5" />
           <span>Reconnecting to room... (Canvas is accessible)</span>

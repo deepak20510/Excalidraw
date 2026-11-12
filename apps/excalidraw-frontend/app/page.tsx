@@ -7,10 +7,7 @@ import {
   PencilLine,
   Share2,
   Layers,
-  Shield,
   MousePointer,
-  Laptop,
-  Zap,
   Move,
   Diamond,
   Circle,
@@ -35,6 +32,12 @@ type ErrorResponse = {
   message?: string;
 };
 
+type RoomInputState =
+  | { phase: "hidden" }
+  | { phase: "idle" }
+  | { phase: "loading" }
+  | { phase: "error"; message: string };
+
 function subscribeToAuthChange(onStoreChange: () => void) {
   const handleStorage = (event: StorageEvent) => {
     if (event.key === "token") {
@@ -56,10 +59,8 @@ function getAuthSnapshot() {
 
 export default function LandingPage() {
   const [year] = useState(() => new Date().getFullYear().toString());
-  const [showRoomInput, setShowRoomInput] = useState(false);
+  const [roomInput, setRoomInput] = useState<RoomInputState>({ phase: "hidden" });
   const [roomSlug, setRoomSlug] = useState("");
-  const [error, setError] = useState("");
-  const [loading, setLoading] = useState(false);
   const router = useRouter();
   const isLoggedIn = useSyncExternalStore(
     subscribeToAuthChange,
@@ -72,14 +73,13 @@ export default function LandingPage() {
     if (!token) {
       router.push("/signin");
     } else {
-      setShowRoomInput(true);
+      setRoomInput({ phase: "idle" });
     }
   };
 
   const handleJoinOrCreateRoom = async () => {
     if (!roomSlug.trim()) return;
-    setError("");
-    setLoading(true);
+    setRoomInput({ phase: "loading" });
     const token = localStorage.getItem("token") || "";
     try {
       let roomId;
@@ -103,14 +103,12 @@ export default function LandingPage() {
         router.push(`/canvas/${roomId}`);
       }
     } catch (err: unknown) {
-      setError(
-        axios.isAxiosError<ErrorResponse>(err)
-          ? err.response?.data?.message ||
-              "Failed to join or create the room."
-          : "Failed to join or create the room."
-      );
-    } finally {
-      setLoading(false);
+      setRoomInput({
+        phase: "error",
+        message: axios.isAxiosError<ErrorResponse>(err)
+          ? err.response?.data?.message || "Failed to join or create the room."
+          : "Failed to join or create the room.",
+      });
     }
   };
 
@@ -158,7 +156,7 @@ export default function LandingPage() {
             {isLoggedIn ? (
               <div className="flex items-center gap-3">
                 <button
-                  onClick={() => setShowRoomInput(true)}
+                  onClick={() => setRoomInput({ phase: "idle" })}
                   className="hidden sm:inline-flex items-center gap-2 px-4 py-2 rounded-xl bg-indigo-600 hover:bg-indigo-500 text-white font-bold text-xs shadow-lg shadow-indigo-500/20 transition-all cursor-pointer"
                 >
                   <Sparkles size={14} />
@@ -170,7 +168,7 @@ export default function LandingPage() {
                     window.dispatchEvent(
                       new StorageEvent("storage", { key: "token" })
                     );
-                    setShowRoomInput(false);
+                    setRoomInput({ phase: "hidden" });
                   }}
                   className="px-4 py-2 rounded-xl bg-zinc-900 border border-white/10 hover:bg-white/10 text-xs font-semibold text-zinc-300 transition-all cursor-pointer"
                 >
@@ -218,7 +216,7 @@ export default function LandingPage() {
           An unbound collaborative whiteboard with hand-drawn RoughJS styling, a floating center-top toolbar, live WebSocket sync, and instant PNG export.
         </p>
 
-        {!showRoomInput ? (
+        {roomInput.phase === "hidden" ? (
           <div className="mt-10 flex flex-col sm:flex-row gap-4 justify-center items-center">
             <button
               onClick={handleStartWhiteboarding}
@@ -251,15 +249,15 @@ export default function LandingPage() {
                 />
                 <button
                   onClick={handleJoinOrCreateRoom}
-                  disabled={loading}
+                  disabled={roomInput.phase === "loading"}
                   className="w-full sm:w-auto flex items-center justify-center gap-2 bg-gradient-to-r from-indigo-500 to-purple-500 hover:opacity-95 text-white font-bold px-6 py-3 rounded-xl transition-all shadow-lg text-sm whitespace-nowrap disabled:opacity-50 cursor-pointer"
                 >
-                  {loading ? "Joining..." : "Enter Room"}
+                  {roomInput.phase === "loading" ? "Joining..." : "Enter Room"}
                 </button>
               </div>
-              {error && (
+              {roomInput.phase === "error" && (
                 <p className="text-red-400 text-xs text-left bg-red-500/10 border border-red-500/20 p-2.5 rounded-xl">
-                  {error}
+                  {roomInput.message}
                 </p>
               )}
             </div>

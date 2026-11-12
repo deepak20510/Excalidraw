@@ -29,6 +29,13 @@ import { CommandPalette } from "./CommandPalette";
 import { HTTP_BACKEND } from "@/config";
 import { useRouter } from "next/navigation";
 
+type UserPermission =
+  | 'admin'
+  | 'editor'
+  | 'viewer'
+  | 'viewer_requested'
+  | 'locked_viewer';
+
 export type Tool =
   | "select"
   | "hand"
@@ -373,8 +380,14 @@ export function Canvas({
   }, [router]);
 
   // Determine current user's role and whether they can draw
-  const myRole = memberRoles[userId ?? ""] ?? "editor";
-  const canDraw = isAdmin || (!isLocked && myRole === "editor");
+  const permission: UserPermission = (() => {
+    if (isAdmin) return 'admin';
+    if (isLocked) return 'locked_viewer';
+    const role = memberRoles[userId ?? ''] ?? 'editor';
+    if (role === 'editor') return 'editor';
+    return hasRequestedPermission ? 'viewer_requested' : 'viewer';
+  })();
+  const canDraw = permission === 'admin' || permission === 'editor';
 
   return (
     <div className="h-screen w-screen overflow-hidden relative bg-[#09090b] select-none font-sans">
@@ -398,17 +411,17 @@ export function Canvas({
         <div className="fixed top-20 left-1/2 -translate-x-1/2 z-50 flex items-center gap-3 bg-red-500/20 border border-red-500/30 text-red-300 text-xs font-semibold px-4 py-2 rounded-full backdrop-blur-xl shadow-lg animate-in fade-in slide-in-from-top-2 duration-300">
           <Lock size={12} />
           <span>
-            {isLocked
+            {permission === 'locked_viewer'
               ? "Canvas is locked by admin — read-only mode"
               : "You are currently in Viewer mode"}
           </span>
           {!isAdmin && (
             <button
               onClick={handleSendPermissionRequest}
-              disabled={hasRequestedPermission}
+              disabled={permission === "viewer_requested"}
               className="bg-indigo-500/30 hover:bg-indigo-500/50 text-indigo-200 border border-indigo-500/40 text-[11px] px-2.5 py-1 rounded-full transition-colors font-bold disabled:opacity-50"
             >
-              {hasRequestedPermission ? "Request Pending..." : "Ask for Permission"}
+              {permission === "viewer_requested" ? "Request Pending..." : "Ask for Permission"}
             </button>
           )}
         </div>

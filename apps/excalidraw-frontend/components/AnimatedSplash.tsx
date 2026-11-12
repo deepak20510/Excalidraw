@@ -218,11 +218,16 @@ export function AnimatedSplash({ isReady, connectionError, onFinish }: AnimatedS
   useEffect(() => {
     if (stage >= 5 && isReady) {
       // Trigger the fadeOut CSS transition
-      setFadeOut(true);
-      const timer = setTimeout(() => {
+      const fadeTimer = setTimeout(() => {
+        setFadeOut(true);
+      }, 0);
+      const finishTimer = setTimeout(() => {
         onFinish();
       }, 500); // matches the opacity transition duration
-      return () => clearTimeout(timer);
+      return () => {
+        clearTimeout(fadeTimer);
+        clearTimeout(finishTimer);
+      };
     }
   }, [stage, isReady, onFinish]);
 

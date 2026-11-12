@@ -9,7 +9,6 @@ import {
   User,
   Eye,
   EyeOff,
-  Sparkles,
   CheckCircle2,
 } from "lucide-react";
 import { useRouter } from "next/navigation";
